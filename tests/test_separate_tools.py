@@ -171,3 +171,112 @@ def test_list_separator_models_passes_vocal_only_through(monkeypatch):
     asyncio.run(tool.fn(vocal_only=False))
 
     assert captured["vocal_only"] is False
+
+
+def test_split_vocal_stems_with_extra_stems_merges_result(tmp_path, monkeypatch):
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    monkeypatch.setattr(constants.Paths, "OUTPUT_DIR", str(output_dir))
+    audio_path = output_dir / "render.wav"
+    _write_tone(audio_path)
+
+    def fake_separate(path, model_filename=None):
+        return {"vocals_path": "/fake/vocals.wav", "instrumental_path": "/fake/instrumental.wav"}
+
+    def fake_separate_extra_stems(path, model_filename):
+        assert model_filename == "htdemucs_6s.yaml"
+        return {
+            "drums_path": "/fake/drums.wav",
+            "bass_path": "/fake/bass.wav",
+            "guitar_path": "/fake/guitar.wav",
+            "piano_path": "/fake/piano.wav",
+            "other_path": "/fake/other.wav",
+        }
+
+    monkeypatch.setattr(separate_tools._client, "separate", fake_separate)
+    monkeypatch.setattr(separate_tools._client, "separate_extra_stems", fake_separate_extra_stems)
+
+    mcp = _register()
+    split_tool = mcp._tool_manager.get_tool("split_vocal_stems")
+
+    async def scenario():
+        result = await split_tool.fn(audio_path=str(audio_path), extra_stems="htdemucs_6s.yaml")
+        job = separate_tools._jobs.get(result["job_id"])
+        for _ in range(50):
+            if job.status != "running":
+                break
+            await asyncio.sleep(0)
+        return job
+
+    job = asyncio.run(scenario())
+    assert job.status == "complete"
+    assert job.result["extra_stems_model"] == "htdemucs_6s.yaml"
+    assert job.result["extra_stems"]["drums_path"] == "/fake/drums.wav"
+    assert job.result["vocals_path"] == "/fake/vocals.wav"
+
+
+def test_split_vocal_stems_without_extra_stems_omits_it_from_result(tmp_path, monkeypatch):
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    monkeypatch.setattr(constants.Paths, "OUTPUT_DIR", str(output_dir))
+    audio_path = output_dir / "render.wav"
+    _write_tone(audio_path)
+
+    def fake_separate(path, model_filename=None):
+        return {"vocals_path": "/fake/vocals.wav", "instrumental_path": "/fake/instrumental.wav"}
+
+    def fail_if_called(path, model_filename):
+        raise AssertionError("separate_extra_stems must not be called when extra_stems is omitted")
+
+    monkeypatch.setattr(separate_tools._client, "separate", fake_separate)
+    monkeypatch.setattr(separate_tools._client, "separate_extra_stems", fail_if_called)
+
+    mcp = _register()
+    split_tool = mcp._tool_manager.get_tool("split_vocal_stems")
+
+    async def scenario():
+        result = await split_tool.fn(audio_path=str(audio_path))
+        job = separate_tools._jobs.get(result["job_id"])
+        for _ in range(50):
+            if job.status != "running":
+                break
+            await asyncio.sleep(0)
+        return job
+
+    job = asyncio.run(scenario())
+    assert job.status == "complete"
+    assert "extra_stems" not in job.result
+
+
+def test_split_vocal_stems_extra_stems_failure_fails_whole_job(tmp_path, monkeypatch):
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    monkeypatch.setattr(constants.Paths, "OUTPUT_DIR", str(output_dir))
+    audio_path = output_dir / "render.wav"
+    _write_tone(audio_path)
+
+    def fake_separate(path, model_filename=None):
+        return {"vocals_path": "/fake/vocals.wav", "instrumental_path": "/fake/instrumental.wav"}
+
+    def fake_separate_extra_stems(path, model_filename):
+        raise SongForgeMCPError(ErrorCode.SEPARATION_FAILED, "boom")
+
+    monkeypatch.setattr(separate_tools._client, "separate", fake_separate)
+    monkeypatch.setattr(separate_tools._client, "separate_extra_stems", fake_separate_extra_stems)
+
+    mcp = _register()
+    split_tool = mcp._tool_manager.get_tool("split_vocal_stems")
+
+    async def scenario():
+        result = await split_tool.fn(audio_path=str(audio_path), extra_stems="htdemucs_6s.yaml")
+        job = separate_tools._jobs.get(result["job_id"])
+        for _ in range(50):
+            if job.status != "running":
+                break
+            await asyncio.sleep(0)
+        return job
+
+    job = asyncio.run(scenario())
+    assert job.status == "error"
+    assert "boom" in job.error
+    assert job.result is None
