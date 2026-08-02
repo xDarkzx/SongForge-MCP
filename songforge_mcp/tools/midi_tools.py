@@ -90,7 +90,9 @@ def register(mcp: FastMCP):
                 (flat/bass/melody/chords from transcribe_instrumental_to_midi).
                 Must be inside this server's own output folder.
             offset: Index of the first note to return, sorted by start time.
-            max_results: Maximum notes to return in one call (default 500).
+            max_results: Maximum notes to return in one call (default 500,
+                hard-capped at 500 server-side regardless of a higher
+                value — page with offset for more instead).
 
         Returns total_note_count, returned_count, offset, and notes (a
         list of {pitch, start, end, velocity}).

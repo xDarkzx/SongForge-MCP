@@ -191,3 +191,8 @@ class Timeouts:
 
 MAX_CAPTION_LENGTH = 1000     # characters
 MAX_LYRICS_LENGTH = 4000      # characters, generous for a full multi-section song
+# get_midi_notes' documented reason for pagination existing at all is
+# capping response size - a caller-supplied max_results with no
+# server-side ceiling defeats that entirely, so this is enforced
+# regardless of what a caller requests, not just a default.
+MAX_MIDI_NOTES_PER_PAGE = 500

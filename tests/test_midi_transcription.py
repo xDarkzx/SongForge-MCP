@@ -148,6 +148,20 @@ def test_get_midi_notes_offset_past_end_returns_empty_page(tmp_path):
     assert page["notes"] == []
 
 
+def test_get_midi_notes_clamps_max_results_to_server_side_cap(tmp_path):
+    path = tmp_path / "notes.mid"
+    _write_simple_midi(path, 600)
+
+    # A caller requesting far more than the cap must not get an
+    # unbounded response - that defeats the whole point of pagination
+    # existing in the first place (see get_midi_notes' own docstring).
+    page = get_midi_notes(str(path), max_results=999_999)
+
+    assert page["total_note_count"] == 600
+    assert page["returned_count"] == 500
+    assert len(page["notes"]) == 500
+
+
 def test_transcribe_to_midi_wraps_prediction_failure():
     with patch("songforge_mcp.midi_transcription.predict", side_effect=RuntimeError("model exploded")):
         with pytest.raises(SongForgeMCPError, match="MIDI transcription failed"):

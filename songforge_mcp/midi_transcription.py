@@ -24,6 +24,7 @@ import pretty_midi
 from basic_pitch import ICASSP_2022_MODEL_PATH
 from basic_pitch.inference import predict
 
+from songforge_mcp_shared.constants import MAX_MIDI_NOTES_PER_PAGE
 from songforge_mcp_shared.error_codes import ErrorCode, SongForgeMCPError
 
 
@@ -122,12 +123,16 @@ def get_midi_notes(path: str, offset: int = 0, max_results: int = 500) -> dict:
     hundreds of notes (e.g. this project's own testing measured 510-821
     notes in a single split track) - returning all of them unconditionally
     in one call could be a very large response for no benefit if the
-    caller only needs to inspect part of it."""
+    caller only needs to inspect part of it. max_results is hard-capped
+    at MAX_MIDI_NOTES_PER_PAGE server-side regardless of what's passed in
+    - a caller-supplied value alone was not actually enforcing the cap
+    this docstring claims to have."""
     pm = pretty_midi.PrettyMIDI(path)
     all_notes = sorted(
         (note for instrument in pm.instruments for note in instrument.notes),
         key=lambda n: n.start,
     )
+    max_results = min(max_results, MAX_MIDI_NOTES_PER_PAGE)
     page = all_notes[offset : offset + max_results]
     return {
         "total_note_count": len(all_notes),
