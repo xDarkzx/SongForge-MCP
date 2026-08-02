@@ -13,6 +13,7 @@
   <a href="https://pypi.org/project/songforge-mcp/"><img src="https://img.shields.io/pypi/v/songforge-mcp" alt="PyPI" /></a>
   <a href="https://github.com/xDarkzx/SongForge-MCP/actions/workflows/ci.yml"><img src="https://github.com/xDarkzx/SongForge-MCP/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/ace-step/ACE-Step-1.5"><img src="https://img.shields.io/badge/GPU-12GB%2B%20VRAM-red.svg" alt="GPU 12GB+ VRAM" /></a>
+  <a href="https://github.com/sponsors/xDarkzx"><img src="https://img.shields.io/badge/Sponsor-30363D?logo=githubsponsors&logoColor=EA4AAA" alt="Sponsor" /></a>
 </p>
 
 <p align="center">
@@ -31,6 +32,12 @@
 road trips, with lyrics about freedom" — and get back a real, finished
 audio file.** No music software, no AI/ML knowledge, and no account or
 subscription required. Everything runs on your own computer.
+
+**If this is useful to you, a star helps other people find it** — that's the whole marketing budget for this project. Want to help keep it maintained? Click the **Sponsor** badge up top.
+
+### Demo
+
+[![Watch the demo](https://img.youtube.com/vi/5-HTVaxtejI/hqdefault.jpg)](https://youtu.be/5-HTVaxtejI)
 
 ## What is this, exactly?
 
@@ -346,6 +353,18 @@ Implemented and verified end-to-end against a live ACE-Step 1.5 instance.
 Vocal/instrumental separation is functional but not perfect — some bleed
 between stems is a known limitation of the current separation model, not
 a bug in this server.
+
+## Support
+
+If SongForge-MCP has helped with your music generation, consider sponsoring:
+
+<p align="center">
+  <a href="https://github.com/sponsors/xDarkzx">
+    <img src="https://img.shields.io/badge/Sponsor-30363D?style=for-the-badge&logo=githubsponsors&logoColor=EA4AAA" alt="GitHub Sponsors" />
+  </a>
+</p>
+
+Your support helps keep this project maintained and free for everyone.
 
 ## License
 
