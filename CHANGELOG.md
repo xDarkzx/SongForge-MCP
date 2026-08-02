@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Added multi-stem separation** — `split_vocal_stems` now takes an
+  optional `extra_stems` param (a Demucs model filename, e.g.
+  `"htdemucs_6s.yaml"`) that runs a second, independent separation pass
+  on the original full mix and returns whatever non-vocal stems that
+  model produces (`drums_path`/`bass_path`/`guitar_path`/`piano_path`/
+  `other_path` for the 6-stem model — the only model in the installed
+  catalog that outputs guitar/piano at all, verified via
+  `--list_models`; `drums_path`/`bass_path`/`other_path` for the
+  higher-accuracy 4-stem `"htdemucs_ft.yaml"`). Runs on the full mix,
+  not chained off the vocal-separated instrumental — Demucs models are
+  trained on full mixes with vocals present, so a vocal-stripped input
+  would be out-of-domain. The model's own vocals output is always
+  discarded in favor of the existing dedicated vocal-Roformer split
+  (meaningfully higher SDR). Omitting `extra_stems` preserves the
+  existing vocals/instrumental-only behavior exactly — no breaking
+  change. Verified end-to-end against a real 45s clip from a previously
+  generated full mix (`hollow_1785193278.wav`) — all 7 stem files
+  (vocals, instrumental, drums, bass, guitar, piano, other) produced
+  without error; actual separation quality (especially guitar/piano,
+  which have no reported SDR in the catalog at all) still needs a real
+  listening pass, not just "it ran successfully."
 - **`prepare_voice_reference` now accepts a local audio file
   (`local_audio_path`) as an alternative to `youtube_url`** — a personal
   sample library clip works the same as a YouTube link (mutually
