@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0
+
 - **Added multi-stem separation** — `split_vocal_stems` now takes an
   optional `extra_stems` param (a Demucs model filename, e.g.
   `"htdemucs_6s.yaml"`) that runs a second, independent separation pass
@@ -142,6 +144,28 @@
   `"LM Codes Strength"` (lets the DiT reinterpret the LM's rhythmic plan
   rather than rigidly reproducing it). Explicitly flagged in the
   instructions as unverified-by-listening-test, not a guaranteed fix.
+- **Fixed a real payload-size bug in `get_midi_notes`**: `max_results`
+  had no enforced upper bound — a caller passing e.g. `999999` got
+  exactly that many notes back, defeating the pagination this tool's
+  own docstring claims exists specifically to bound response size. Now
+  clamped to `MAX_MIDI_NOTES_PER_PAGE` (500) server-side regardless of
+  what's requested.
+- **Fixed stale documentation across `ARCHITECTURE.md`/`TOOLS.md`**:
+  both still described inline MCP `AudioContent` audio playback that
+  was tried and reverted earlier in this project's life — the real
+  current behavior (paths + small metadata only, best-effort auto-play
+  via the OS's own default app) was never written up. `split_vocal_stems`
+  was documented as a blocking single call; it's actually been
+  job/poll-based for a while, and the docs never caught up, nor
+  mentioned `extra_stems`. 5 of 14 registered tools
+  (`prepare_voice_reference`, `analyze_reference_audio`,
+  `transcribe_instrumental_to_midi`, `get_midi_notes`,
+  `list_separator_models`) had no documentation entry at all.
+  `generate_vocal_track`'s documented params were missing
+  `remix_melody_retention`, `remix_no_fsq`, `song_title`, `split_stems`,
+  and `lora_path` entirely. `check_vocal_track_status`'s own docstring
+  (read by the calling model every turn) also only named 4 of the 7
+  job-based tools that actually share it.
 
 ## 0.3.0
 
