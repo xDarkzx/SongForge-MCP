@@ -224,3 +224,161 @@ def test_list_models_vocal_only_false_includes_non_vocal_models(tmp_path, monkey
     assert "denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt" in filenames
     denoise_entry = next(m for m in models if m["filename"].startswith("denoise_"))
     assert denoise_entry["vocal_sdr"] is None
+
+
+def test_find_labeled_stems_parses_demucs_six_stem_output(tmp_path):
+    from songforge_mcp.separator_client import _find_labeled_stems
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    stem = "mytrack"
+    for label in ["Vocals", "Drums", "Bass", "Guitar", "Piano", "Other"]:
+        (out_dir / f"{stem}_({label})_htdemucs_6s.wav").write_text("fake")
+
+    result = _find_labeled_stems(str(out_dir), stem)
+
+    assert set(result.keys()) == {"vocals", "drums", "bass", "guitar", "piano", "other"}
+    assert result["drums"].name == f"{stem}_(Drums)_htdemucs_6s.wav"
+
+
+def test_find_labeled_stems_returns_empty_dict_when_no_matches(tmp_path):
+    from songforge_mcp.separator_client import _find_labeled_stems
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    result = _find_labeled_stems(str(out_dir), "mytrack")
+
+    assert result == {}
+
+
+def test_separate_extra_stems_runs_subprocess_and_excludes_vocals(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants.Paths, "OUTPUT_DIR", str(tmp_path / "output"))
+    python_exe = _make_fake_venv(tmp_path)
+
+    input_path = tmp_path / "render.wav"
+    input_path.write_text("fake audio")
+
+    def fake_run(cmd, **kwargs):
+        out_dir = cmd[cmd.index("--output_dir") + 1]
+        os.makedirs(out_dir, exist_ok=True)
+        for label in ["Vocals", "Drums", "Bass", "Guitar", "Piano", "Other"]:
+            with open(os.path.join(out_dir, f"render_({label})_htdemucs_6s.wav"), "w") as f:
+                f.write(f"fake {label}")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("songforge_mcp.separator_client.subprocess.run", fake_run)
+
+    client = SeparatorClient(separator_venv_python=python_exe)
+    result = client.separate_extra_stems(str(input_path), model_filename="htdemucs_6s.yaml")
+
+    assert set(result.keys()) == {"drums_path", "bass_path", "guitar_path", "piano_path", "other_path"}
+    assert "vocals_path" not in result
+    assert result["drums_path"].endswith("(Drums)_htdemucs_6s.wav")
+
+
+def test_separate_extra_stems_defaults_to_htdemucs_6s(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants.Paths, "OUTPUT_DIR", str(tmp_path / "output"))
+    python_exe = _make_fake_venv(tmp_path)
+
+    input_path = tmp_path / "render.wav"
+    input_path.write_text("fake audio")
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        out_dir = cmd[cmd.index("--output_dir") + 1]
+        os.makedirs(out_dir, exist_ok=True)
+        for label in ["Vocals", "Drums", "Bass", "Guitar", "Piano", "Other"]:
+            with open(os.path.join(out_dir, f"render_({label})_htdemucs_6s.wav"), "w") as f:
+                f.write(f"fake {label}")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("songforge_mcp.separator_client.subprocess.run", fake_run)
+
+    client = SeparatorClient(separator_venv_python=python_exe)
+    client.separate_extra_stems(str(input_path))
+
+    assert "htdemucs_6s.yaml" in captured["cmd"]
+
+
+def test_separate_extra_stems_is_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants.Paths, "OUTPUT_DIR", str(tmp_path / "output"))
+    python_exe = _make_fake_venv(tmp_path)
+
+    input_path = tmp_path / "render.wav"
+    input_path.write_text("fake audio")
+
+    stems_dir = tmp_path / "output" / "stems" / "htdemucs_6s_yaml"
+    stems_dir.mkdir(parents=True)
+    for label in ["Vocals", "Drums", "Bass", "Guitar", "Piano", "Other"]:
+        (stems_dir / f"render_({label})_htdemucs_6s.wav").write_text(f"fake {label}")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("subprocess.run must not be called when extra stems already exist")
+
+    monkeypatch.setattr("songforge_mcp.separator_client.subprocess.run", fail_if_called)
+
+    client = SeparatorClient(separator_venv_python=python_exe)
+    result = client.separate_extra_stems(str(input_path), model_filename="htdemucs_6s.yaml")
+
+    assert set(result.keys()) == {"drums_path", "bass_path", "guitar_path", "piano_path", "other_path"}
+
+
+def test_separate_extra_stems_reruns_when_existing_stems_are_incomplete(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants.Paths, "OUTPUT_DIR", str(tmp_path / "output"))
+    python_exe = _make_fake_venv(tmp_path)
+
+    input_path = tmp_path / "render.wav"
+    input_path.write_text("fake audio")
+
+    stems_dir = tmp_path / "output" / "stems" / "htdemucs_6s_yaml"
+    stems_dir.mkdir(parents=True)
+    # Only one stray file present - e.g. a previous run was killed mid-write.
+    (stems_dir / "render_(Drums)_htdemucs_6s.wav").write_text("fake drums")
+
+    called = {}
+
+    def fake_run(cmd, **kwargs):
+        called["ran"] = True
+        out_dir = cmd[cmd.index("--output_dir") + 1]
+        os.makedirs(out_dir, exist_ok=True)
+        for label in ["Vocals", "Drums", "Bass", "Guitar", "Piano", "Other"]:
+            with open(os.path.join(out_dir, f"render_({label})_htdemucs_6s.wav"), "w") as f:
+                f.write(f"fake {label}")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("songforge_mcp.separator_client.subprocess.run", fake_run)
+
+    client = SeparatorClient(separator_venv_python=python_exe)
+    result = client.separate_extra_stems(str(input_path), model_filename="htdemucs_6s.yaml")
+
+    assert called.get("ran") is True
+    assert len(result) == 5
+
+
+def test_separate_extra_stems_raises_on_nonzero_exit_code(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants.Paths, "OUTPUT_DIR", str(tmp_path / "output"))
+    python_exe = _make_fake_venv(tmp_path)
+
+    input_path = tmp_path / "render.wav"
+    input_path.write_text("fake audio")
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="model failed to load")
+
+    monkeypatch.setattr("songforge_mcp.separator_client.subprocess.run", fake_run)
+
+    client = SeparatorClient(separator_venv_python=python_exe)
+    with pytest.raises(SongForgeMCPError) as exc_info:
+        client.separate_extra_stems(str(input_path), model_filename="htdemucs_6s.yaml")
+    assert exc_info.value.code == ErrorCode.SEPARATION_FAILED
+
+
+def test_separate_extra_stems_raises_when_input_file_missing(tmp_path):
+    python_exe = _make_fake_venv(tmp_path)
+    client = SeparatorClient(separator_venv_python=python_exe)
+    with pytest.raises(SongForgeMCPError) as exc_info:
+        client.separate_extra_stems(str(tmp_path / "does_not_exist.wav"))
+    assert exc_info.value.code == ErrorCode.FILE_NOT_FOUND

@@ -71,6 +71,23 @@ def _find_stem_output(out_dir: str, stem: str) -> tuple[Path | None, Path | None
         return None, None
     return vocals[0], instrumental[0]
 
+
+def _find_labeled_stems(out_dir: str, stem: str) -> dict[str, Path]:
+    """Returns {label.lower(): path} for every {stem}_(Label)_*.wav file
+    found in out_dir - e.g. {"drums": ..., "bass": ..., "guitar": ...}.
+    Unlike _find_stem_output (which expects exactly two known buckets,
+    vocals vs. everything else), this doesn't assume which labels a
+    model produces - Demucs models vary (4-stem vs. 6-stem), and the
+    caller shouldn't need to hardcode that per model. Returns {} if no
+    labeled files are found at all."""
+    candidates = list(Path(out_dir).glob(f"{stem}_*.wav"))
+    stems: dict[str, Path] = {}
+    for f in candidates:
+        label_match = _STEM_LABEL_RE.search(f.stem)
+        if label_match:
+            stems[label_match.group(1).lower()] = f
+    return stems
+
 _SEPARATOR_EXE_NAME = "audio-separator.exe" if platform.system() == "Windows" else "audio-separator"
 
 # `audio-separator --list_models` prints a fixed-width table; columns are
@@ -186,6 +203,77 @@ class SeparatorClient:
                 f"separation reported success but expected output files were not found in {out_dir}",
             )
         return {"vocals_path": str(vocals), "instrumental_path": str(instrumental)}
+
+    def separate_extra_stems(self, audio_path: str, model_filename: str = "htdemucs_6s.yaml") -> dict:
+        """Returns {"{label}_path": str, ...} for every non-vocal stem
+        the given model produces - e.g. htdemucs_6s.yaml (the only
+        model in audio-separator's catalog that outputs guitar/piano)
+        gives drums_path/bass_path/guitar_path/piano_path/other_path;
+        htdemucs_ft.yaml gives drums_path/bass_path/other_path only.
+        The vocals stem this model also produces is always dropped -
+        call separate() for vocals instead, which uses a dedicated
+        model with meaningfully higher vocal SDR.
+
+        Runs on audio_path directly (the original full mix), never on
+        an already vocal-separated file - Demucs models are trained on
+        full mixes with vocals present, so feeding one a vocal-stripped
+        file would be out-of-domain input with unpredictable quality
+        impact on the remaining stems.
+
+        Idempotent per (source file, model) pair, same reasoning as
+        separate(): if at least two non-vocal stems already exist for
+        this exact (audio_path, model_filename) pair, returns those
+        without re-running. The "at least two" floor (rather than
+        exactly matching the model's full expected stem count, which
+        this method deliberately doesn't hardcode) still catches an
+        obviously incomplete previous run - e.g. a process killed
+        mid-write leaving a single stray file - without needing to know
+        in advance how many stems a given model produces."""
+        separator_exe = self._require_configured()
+        if not os.path.isfile(audio_path):
+            raise SongForgeMCPError(
+                ErrorCode.FILE_NOT_FOUND, f"audio_path does not exist: {audio_path}"
+            )
+
+        model_tag = _model_tag(model_filename)
+        out_dir = os.path.join(Paths.OUTPUT_DIR, "stems", model_tag)
+        ensure_private_dir(out_dir)
+        stem = Path(audio_path).stem
+
+        existing = {k: v for k, v in _find_labeled_stems(out_dir, stem).items() if k != "vocals"}
+        if len(existing) >= 2:
+            return {f"{label}_path": str(path) for label, path in existing.items()}
+
+        with self._lock:
+            try:
+                result = subprocess.run(
+                    [
+                        separator_exe, audio_path,
+                        "--output_dir", out_dir,
+                        "--output_format", "wav",
+                        "--model_filename", model_filename,
+                    ],
+                    capture_output=True, text=True, timeout=Timeouts.SEPARATION, check=False,
+                    **no_window_popen_kwargs(),
+                )
+            except subprocess.TimeoutExpired as e:
+                raise SongForgeMCPError(
+                    ErrorCode.SUBPROCESS_TIMEOUT, f"separation exceeded {Timeouts.SEPARATION}s"
+                ) from e
+
+        if result.returncode != 0:
+            raise SongForgeMCPError(
+                ErrorCode.SEPARATION_FAILED,
+                f"audio-separator exited {result.returncode}: {result.stderr.strip()[-2000:]}",
+            )
+
+        stems = {k: v for k, v in _find_labeled_stems(out_dir, stem).items() if k != "vocals"}
+        if len(stems) < 2:
+            raise SongForgeMCPError(
+                ErrorCode.SEPARATION_FAILED,
+                f"separation reported success but expected stem output files were not found in {out_dir}",
+            )
+        return {f"{label}_path": str(path) for label, path in stems.items()}
 
     def list_models(self, vocal_only: bool = True) -> list[dict]:
         """Returns audio-separator's model catalog, sorted by vocal SDR
