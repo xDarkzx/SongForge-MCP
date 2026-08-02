@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **Fixed a real silent-failure bug: reference-audio uploads could be
+  treated as attached when they weren't.** The Playwright automation
+  used a blind `wait_for_timeout(6000)` after setting the file input,
+  then proceeded regardless — if the upload took longer than 6s,
+  generation silently ran on the base model with no reference audio at
+  all, indistinguishable from a real voice match in the response. Now
+  waits (up to 20s) for the UI to actually confirm the file attached,
+  raises a typed error if it never does, and returns
+  `reference_audio_confirmed` in the result so `used_reference_audio`
+  in tool diagnostics reflects a confirmed attach, not just that a path
+  was passed in. Also explicitly propagates `ACESTEP_GENERATION_TIMEOUT`
+  to the spawned server process so its own generation watchdog
+  (previously defaulting to 600s, unaware of this client's much longer
+  `Timeouts.GENERATION` patience) can't kill a legitimately-still-running
+  generation out from under it. Reverted `GradioServer.CHECKPOINT`'s
+  default from a brief turbo experiment back to `acestep-v15-xl-sft` —
+  turbo's distillation bakes in `guidance_scale=1.0` (no CFG), and CFG is
+  what makes the model adhere strongly to reference-audio timbre, not
+  just text/lyrics; turbo clones reference voices noticeably weaker as a
+  direct consequence, confirmed from ACE-Step's own model code.
 - **Fixed a real production failure in the new default model
   (`vocals_mel_band_roformer.ckpt`): separation actually succeeded but
   `SeparatorClient` failed to find its own output files.** Two compounding

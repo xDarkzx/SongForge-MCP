@@ -205,7 +205,14 @@ def register(mcp: FastMCP):
                     "diagnostics": {
                         "generation_seconds": result["generation_seconds"],
                         "duration_seconds": duration,
-                        "used_reference_audio": resolved_reference_path is not None,
+                        # Confirmed the file actually registered in ACE-Step's
+                        # UI before generation started - not just that a path
+                        # was passed in. False here (when a reference WAS
+                        # requested) would previously have meant the file
+                        # silently never loaded and generation ran on the
+                        # base model instead, indistinguishable from a real
+                        # voice match without this field.
+                        "used_reference_audio": result.get("reference_audio_confirmed", False),
                         "used_remix_source": resolved_remix_path is not None,
                         "output_format": output_format,
                     },
@@ -404,7 +411,7 @@ def register(mcp: FastMCP):
                                 "diagnostics": {
                                     "generation_seconds": result["generation_seconds"],
                                     "duration_seconds": duration,
-                                    "used_reference_audio": resolved_reference_path is not None,
+                                    "used_reference_audio": result.get("reference_audio_confirmed", False),
                                     "output_format": output_format,
                                 },
                                 "measured": measured,

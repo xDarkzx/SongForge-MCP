@@ -26,6 +26,7 @@ way during testing:
    launch a second server process) while one is already in flight.
 """
 import asyncio
+import logging
 import os
 import platform
 import re
@@ -42,6 +43,8 @@ from playwright.async_api import async_playwright
 
 from songforge_mcp_shared.constants import GradioServer, Paths, Timeouts, ensure_private_dir
 from songforge_mcp_shared.error_codes import ErrorCode, SongForgeMCPError
+
+logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -307,6 +310,18 @@ class ACEStepClient:
                             if _IS_WINDOWS
                             else {"start_new_session": True}
                         )
+                        # ACE-Step's own generation watchdog (ACESTEP_GENERATION_TIMEOUT,
+                        # default 600s if unset) is separate from this client's own
+                        # Timeouts.GENERATION polling patience above - the server was
+                        # never told about our more generous budget, so it could kill a
+                        # legitimately-still-running generation (e.g. reference-audio's
+                        # slower backend, or a long-duration request) at 600s while this
+                        # client was still happily waiting up to Timeouts.GENERATION.
+                        # Must match here explicitly rather than rely on ambient
+                        # environment, since nothing else sets this for a freshly
+                        # spawned server process.
+                        launch_env = os.environ.copy()
+                        launch_env["ACESTEP_GENERATION_TIMEOUT"] = str(int(Timeouts.GENERATION))
                         try:
                             with open(stdout_log, "wb") as out_f, open(stderr_log, "wb") as err_f:
                                 await asyncio.to_thread(
@@ -316,6 +331,7 @@ class ACEStepClient:
                                     stdout=out_f,
                                     stderr=err_f,
                                     stdin=subprocess.DEVNULL,
+                                    env=launch_env,
                                     **detach_kwargs,
                                 )
                         except OSError as e:
@@ -795,6 +811,7 @@ class ACEStepClient:
                 await page.get_by_label("Lyrics").click()
                 await page.get_by_label("Lyrics").fill(lyrics)
 
+                reference_audio_confirmed = False
                 if reference_audio_path:
                     if not os.path.isfile(reference_audio_path):
                         raise SongForgeMCPError(
@@ -810,7 +827,28 @@ class ACEStepClient:
                     await ref_section.locator("input[type='file']").first.set_input_files(
                         trimmed_reference_path
                     )
-                    await page.wait_for_timeout(6000)
+                    # Confirm the upload actually registered in the UI before
+                    # proceeding - a blind fixed wait here previously let
+                    # generation start with no reference audio attached at all
+                    # (indistinguishable from the base model) whenever the
+                    # upload happened to take longer than the wait, with no
+                    # error or signal that anything was wrong. Recorded below
+                    # (reference_audio_confirmed) and returned to the caller so
+                    # it's visible in the job result, not just enforced silently.
+                    try:
+                        await ref_section.locator("audio").first.wait_for(
+                            state="attached", timeout=20000
+                        )
+                        reference_audio_confirmed = True
+                        logger.info(
+                            f"Reference audio confirmed attached in UI: {trimmed_reference_path}"
+                        )
+                    except Exception as e:
+                        raise SongForgeMCPError(
+                            ErrorCode.SUBPROCESS_FAILED,
+                            "Reference audio did not register in the UI within 20s - "
+                            "generation would have proceeded without it. Not continuing.",
+                        ) from e
 
                 # Batch Size defaults to ACE-Step's own "2" (two full takes
                 # generated per request) unless overridden. Relying on the
@@ -906,4 +944,8 @@ class ACEStepClient:
         filename = f"{slug}_{int(start_time)}{newest.suffix}" if slug else f"{int(start_time)}_{newest.name}"
         final_path = os.path.join(Paths.OUTPUT_DIR, filename)
         shutil.copy(str(newest), final_path)
-        return {"audio_path": final_path, "generation_seconds": round(time.time() - start_time, 1)}
+        return {
+            "audio_path": final_path,
+            "generation_seconds": round(time.time() - start_time, 1),
+            "reference_audio_confirmed": reference_audio_confirmed,
+        }
