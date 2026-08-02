@@ -1,7 +1,5 @@
 # Changelog
 
-## Unreleased
-
 ## 0.4.0
 
 - **Added multi-stem separation** — `split_vocal_stems` now takes an
