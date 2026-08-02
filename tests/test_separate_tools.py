@@ -202,7 +202,11 @@ def test_split_vocal_stems_with_extra_stems_merges_result(tmp_path, monkeypatch)
     async def scenario():
         result = await split_tool.fn(audio_path=str(audio_path), extra_stems="htdemucs_6s.yaml")
         job = separate_tools._jobs.get(result["job_id"])
-        for _ in range(50):
+        # 200, not the usual 50: this job makes two sequential
+        # asyncio.to_thread hops (separate, then separate_extra_stems),
+        # not one - matches test_generate_tools.py's own precedent for
+        # multi-step jobs (its 3-sequential-takes test also needed 200).
+        for _ in range(200):
             if job.status != "running":
                 break
             await asyncio.sleep(0)
@@ -270,7 +274,8 @@ def test_split_vocal_stems_extra_stems_failure_fails_whole_job(tmp_path, monkeyp
     async def scenario():
         result = await split_tool.fn(audio_path=str(audio_path), extra_stems="htdemucs_6s.yaml")
         job = separate_tools._jobs.get(result["job_id"])
-        for _ in range(50):
+        # 200, not the usual 50 - see the merges_result test above for why.
+        for _ in range(200):
             if job.status != "running":
                 break
             await asyncio.sleep(0)
