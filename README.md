@@ -33,6 +33,8 @@ road trips, with lyrics about freedom" — and get back a real, finished
 audio file.** No music software, no AI/ML knowledge, and no account or
 subscription required. Everything runs on your own computer.
 
+**If this is useful to you, a star helps other people find it** — that's the whole marketing budget for this project. Want to help keep it maintained? Click the **Sponsor** badge up top.
+
 ## What is this, exactly?
 
 This is an **MCP server** — a small local program that gives Claude
