@@ -251,11 +251,14 @@ def register(mcp: FastMCP):
 
     @mcp.tool(structured_output=False)
     async def check_vocal_track_status(job_id: str, wait_seconds: float = 25.0) -> list:
-        """Poll a job from generate_vocal_track, split_vocal_stems,
-        analyze_reference_audio, or transcribe_instrumental_to_midi — all
-        four share this one status tool and one registry. Waits up to
-        wait_seconds server-side if still running (capped at 25s) — call
-        again immediately on "running", no extra delay needed.
+        """Poll a job started by any job-based tool on this server
+        (generate_vocal_track, generate_vocal_track_takes,
+        split_vocal_stems, analyze_reference_audio,
+        transcribe_instrumental_to_midi, edit_audio_track,
+        prepare_voice_reference) — they all share this one status tool
+        and one registry. Waits up to wait_seconds server-side if still
+        running (capped at 25s) — call again immediately on "running",
+        no extra delay needed.
 
         Say almost nothing while polling: one message when it finishes or
         errors, optionally one if it's taking a couple of minutes-plus.

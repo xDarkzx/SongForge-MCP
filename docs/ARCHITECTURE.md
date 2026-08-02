@@ -214,18 +214,30 @@ exist, deliberately different in strictness:
   model being wrong about what's safe to remove should never be able to
   permanently destroy a generation.
 
-Both tools also return their audio inline as MCP `AudioContent` (via
-FastMCP's `Audio` helper) rather than only a file path string, so the
-result is directly playable in the calling client without a separate
-file-access step. Not every client's chat UI renders that block type yet
-(observed on Claude Desktop as an "unsupported format" message even
-though generation had genuinely succeeded — confirmed by checking the
-server's own log, which showed no error, and the output file, which
-existed and played correctly). Since this server can't detect what the
-calling client actually supports, every completed-status response also
-includes a plain-language `note` pointing at the real `audio_path` on
-disk as a fallback the calling model can relay if inline playback
-doesn't show up.
+**No tool ever returns audio inline** (no MCP `AudioContent`/base64/raw
+bytes) — every completed job's result is paths and small scalar
+metadata only (durations, seed values, BPM/key, note counts, etc.),
+regardless of how large the underlying file is. This was tried the
+other way first (returning generated audio inline via FastMCP's `Audio`
+helper) and reverted: not every client's chat UI renders that block
+type (observed on Claude Desktop as an "unsupported format" message
+even though generation had genuinely succeeded — confirmed by checking
+the server's own log, which showed no error, and the output file, which
+existed and played correctly), and it meant pushing a full audio
+payload back through the conversation on every completion regardless.
+`generate_vocal_track`'s job instead best-effort auto-launches the
+finished file in the OS's own default player (`open_with_default_app`,
+`songforge_mcp_shared/constants.py`) as a convenience — a failure there
+(e.g. no default app registered) is swallowed and never turns a
+successful generation into a reported error, since the real deliverable
+is the `audio_path` already sitting in `job.result` either way.
+`get_midi_notes` is the one tool that returns real content instead of
+just a path (raw note data, not a summary) — it exists because nothing
+else exposes ground-truth MIDI content to the calling model, but even
+there the response is capped server-side (`MAX_MIDI_NOTES_PER_PAGE`,
+`songforge_mcp_shared/constants.py`) regardless of what `max_results` a
+caller requests, so a large transcription can't produce an unbounded
+response.
 
 ## Cross-platform process launching
 
