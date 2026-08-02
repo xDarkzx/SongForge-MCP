@@ -94,6 +94,33 @@ class Paths:
     REFERENCE_VOICES_DIR = os.path.join(OUTPUT_ROOT, "reference_voices")
 
 
+class Separator:
+    # The model previously in use (model_bs_roformer_ep_317_sdr_12.9755.ckpt,
+    # audio-separator's own default) left vocals bleeding into the
+    # instrumental stem on dense/loud mixes - heavy synths/distortion
+    # masking vocal frequencies badly enough that some vocal passages were
+    # misclassified as instrumental entirely, not just degraded. A sibling
+    # BS-Roformer checkpoint (same architecture/training lineage, just a
+    # different epoch) was considered but rejected as the default: if the
+    # failure is architectural, a same-family checkpoint likely inherits
+    # the same weakness rather than actually testing a different approach.
+    # vocals_mel_band_roformer.ckpt: the highest vocal SDR (12.6) of every
+    # model in audio-separator's full catalog (checked directly via
+    # `audio-separator --list_models`, not assumed) - beats every
+    # BS-Roformer checkpoint (best: 12.1) and every MDX-Net option
+    # (best: 10.4), while also being a different architecture from the
+    # BS-Roformer model that was actually failing on dense mixes, so this
+    # isn't just a marginally-different same-family checkpoint. Still
+    # unproven on this project's actual dense mixes until tested for real.
+    DEFAULT_MODEL = os.environ.get(
+        "SONGFORGE_SEPARATOR_MODEL", "vocals_mel_band_roformer.ckpt"
+    )
+    # Best-scoring BS-Roformer checkpoint (12.1 vocal SDR, vs. the old
+    # default's 11.8) - kept as a same-family fallback to A/B against, in
+    # case the architecture change above turns out worse in practice.
+    ALT_MODEL = "model_bs_roformer_ep_368_sdr_12.9628.ckpt"
+
+
 class GradioServer:
     HOST = "127.0.0.1"
     PORT = int(os.environ.get("SONGFORGE_ACESTEP_PORT", "7866"))
@@ -130,10 +157,18 @@ class Timeouts:
     SERVER_STARTUP = 300.0
     GENERATION = 1800.0
     YOUTUBE_DOWNLOAD = 120.0
-    # Separation is a short, independent operation (~5-15s observed) - kept
-    # apart from GENERATION so a stuck separator doesn't silently wait 15
-    # minutes before reporting a problem.
-    SEPARATION = 180.0
+    # The ~5-15s this was originally sized around was observed with the
+    # OLD default separator model (model_bs_roformer_ep_317_sdr_12.9755.ckpt).
+    # The new default (Separator.DEFAULT_MODEL, vocals_mel_band_roformer.ckpt,
+    # swapped for its vocal-isolation quality - see that constant's comment)
+    # is a different, apparently slower architecture: a real timeout was
+    # observed at 194s on a longer file, already past the old 180s ceiling.
+    # Raised with real headroom rather than a precisely re-measured value,
+    # same reasoning as GENERATION above - kept apart from GENERATION's much
+    # larger budget so a genuinely stuck separator still fails in a bounded
+    # time, not GENERATION's 1800s, since separation is not diffusion-based
+    # and should never legitimately need that long.
+    SEPARATION = 600.0
     # edit_audio_track's mp3 path shells out to ffmpeg for the one format
     # soundfile/libsndfile can't write directly - a few minutes of audio
     # transcodes in well under this on any real hardware.

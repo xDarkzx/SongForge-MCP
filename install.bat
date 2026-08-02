@@ -84,6 +84,12 @@ python -m venv "%SEPARATOR_HOME%"
 "%SEPARATOR_HOME%\Scripts\python.exe" -m pip install audio-separator onnxruntime-gpu
 setx SONGFORGE_SEPARATOR_PYTHON "%SEPARATOR_HOME%\Scripts\python.exe"
 
+echo Pre-downloading separator models (avoids a slow first-use download
+echo during a real generation) - see songforge_mcp_shared/constants.py's
+echo Separator class for why these two specifically...
+"%SEPARATOR_HOME%\Scripts\audio-separator.exe" --download_model_only -m vocals_mel_band_roformer.ckpt
+"%SEPARATOR_HOME%\Scripts\audio-separator.exe" --download_model_only -m model_bs_roformer_ep_368_sdr_12.9628.ckpt
+
 REM ---- Step 6: yt-dlp (already a dependency of this server's own venv) ----
 setx SONGFORGE_YTDLP_PYTHON "%~dp0.venv\Scripts\python.exe"
 

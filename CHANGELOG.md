@@ -2,6 +2,60 @@
 
 ## Unreleased
 
+- **Fixed a real production failure in the new default model
+  (`vocals_mel_band_roformer.ckpt`): separation actually succeeded but
+  `SeparatorClient` failed to find its own output files.** Two compounding
+  bugs, both now fixed with a regression test:
+  (1) `_find_stem_output` matched hardcoded `"(Vocals)"`/`"(Instrumental)"`
+  literally — the new model writes lowercase `"(vocals)"`/`"(other)"`
+  instead, so nothing matched at all.
+  (2) The first fix attempt classified by whether `"vocal"` appeared
+  anywhere in the filename — still wrong, because this model's own
+  filename (`vocals_mel_band_roformer`) is appended as a suffix to
+  *every* output file, so both got misclassified as vocals and nothing
+  was left for instrumental. Now extracts specifically the parenthesized
+  stem label (`"(vocals)"`/`"(other)"`/`"(Instrumental)"`) and classifies
+  only that, which is immune to the model's own name containing "vocal".
+  Files from affected runs weren't lost — the underlying separation had
+  already succeeded — they'll be picked up by the idempotency cache on
+  the next call with the same (audio_path, model) instead of re-running.
+- **Made `split_vocal_stems`' separator model configurable, and swapped
+  the default off audio-separator's own built-in default
+  (`model_bs_roformer_ep_317_sdr_12.9755.ckpt`).** Real-world use showed
+  vocals bleeding into the instrumental stem badly enough that some vocal
+  passages were misclassified as instrumental entirely (not just
+  degraded) on dense/loud mixes, where heavy instrumental content masks
+  vocal frequencies. New default is `vocals_mel_band_roformer.ckpt` — the
+  highest vocal SDR (12.6) of every model in audio-separator's full
+  catalog (checked directly via `--list_models`, not assumed), and a
+  different architecture from the BS-Roformer model that was actually
+  failing, not just a same-family checkpoint swap that likely inherits
+  the same weakness. `split_vocal_stems` now takes an optional `model`
+  param — pass `Separator.ALT_MODEL` (best-scoring BS-Roformer checkpoint,
+  12.1 vocal SDR) to A/B test against the new default on the same source.
+  Neither is proven better on this project's actual dense mixes yet —
+  this needs a real listening test, not just SDR benchmark numbers, which
+  aren't genre-specific. `SeparatorClient.separate()`'s idempotency cache
+  is now scoped per (source file, model) via a subfolder per model,
+  rather than per source file only — testing a second model against the
+  same source no longer silently returns the first model's cached
+  result. `install.bat`/`install.sh` now pre-download both candidate
+  models during setup instead of a surprise first-use download.
+  **Follow-up fix:** the new default model is a different, apparently
+  slower architecture than the old one — a real 194s separation was
+  observed on a longer file, already past the previous 180s
+  `Timeouts.SEPARATION` ceiling (sized around the old model's ~5-15s).
+  Raised to 600s with real headroom, same reasoning as `Timeouts.GENERATION`.
+  `split_vocal_stems`'s docstring now tells the calling model to reach for
+  `Separator.ALT_MODEL` proactively when turnaround matters more than the
+  default's stronger vocal isolation, instead of waiting on a timeout and
+  retrying reactively.
+- **Added `list_separator_models` tool** — returns audio-separator's full
+  model catalog (parsed from `--list_models`, sorted by vocal SDR
+  descending), so the calling model can discover and suggest any
+  separator model, not just the two named `Separator.DEFAULT_MODEL`/
+  `ALT_MODEL` constants, when neither is separating a given file cleanly.
+  Fast/synchronous — no job polling needed.
 - **Fixed a real, confirmed bug class in `_set_field_by_label`: every
   `advanced_settings` write (fill, select, checkbox, radio-fallback) was
   treated as successful whenever the underlying Playwright call didn't
