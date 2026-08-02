@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`prepare_voice_reference` now accepts a local audio file
+  (`local_audio_path`) as an alternative to `youtube_url`** — a personal
+  sample library clip works the same as a YouTube link (mutually
+  exclusive, exactly one required): downloaded/loaded, vocals
+  separated, and saved into that voice's library folder either way.
 - **Fixed a real silent-failure bug: reference-audio uploads could be
   treated as attached when they weren't.** The Playwright automation
   used a blind `wait_for_timeout(6000)` after setting the file input,
