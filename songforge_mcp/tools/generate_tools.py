@@ -50,8 +50,15 @@ def register(mcp: FastMCP):
         tool's own docs for how sparse updates should be.
 
         Renders a complete song, not an isolated vocal — the default,
-        complete deliverable. Don't call split_vocal_stems unless the
-        user explicitly asks for the stems.
+        complete deliverable. Leave split_stems at its default False
+        unless the user's current request explicitly asks for stems —
+        do not set it True on your own judgment, and do not carry it
+        over from an earlier request in the same conversation. A plain
+        "generate a track" request is complete once the track exists;
+        the finished mix auto-plays via the OS's default player right
+        after this job completes, which splitting stems first would
+        delay. Also don't call split_vocal_stems unless the user
+        explicitly asks for the stems.
 
         Args:
             caption: Genre/mood/instrumentation/vocal-style tags, e.g.
@@ -104,12 +111,15 @@ def register(mcp: FastMCP):
                 directory (e.g. from this server's own training pipeline
                 or ACE-Step's Training tab) to load and enable before
                 generating. Leave unset for normal generation.
-            split_stems: If True, also separate the finished mix into
-                vocal-only and instrumental-only stems in this same job,
-                returned as vocals_path/instrumental_path from
-                check_vocal_track_status. Prefer this over a separate
-                split_vocal_stems call whenever you already know you'll
-                want the stems.
+            split_stems: Default False — leave it False unless the
+                user's current request explicitly asked for stems. If
+                True, also separates the finished mix into vocal-only
+                and instrumental-only stems in this same job, returned
+                as vocals_path/instrumental_path from
+                check_vocal_track_status, and delays the auto-play of
+                the finished track until after that split completes.
+                When stems genuinely were requested, prefer this over a
+                separate split_vocal_stems call.
         """
         validate_caption(caption)
         validate_lyrics(lyrics)

@@ -13,7 +13,17 @@ def register(mcp: FastMCP):
     async def split_vocal_stems(
         audio_path: str, model: str | None = None, extra_stems: str | None = None
     ) -> dict:
-        """Start splitting a full mix into a vocals-only stem and an
+        """Only call this when the user's current request explicitly asks
+        for the track to be split into stems — never proactively, and
+        never just because it was used earlier in the conversation. A
+        plain "generate a track" request is complete once
+        generate_vocal_track finishes; do not follow it with this tool
+        on your own judgment, and do not assume which stems are wanted
+        (vocals/instrumental only, or also drums/bass/guitar/piano via
+        extra_stems below) — ask, if the user's request didn't already
+        say.
+
+        Start splitting a full mix into a vocals-only stem and an
         instrumental-only stem via audio-separator. Returns {"job_id": str}
         immediately — poll check_vocal_track_status(job_id) exactly as for
         generate_vocal_track (same tool, same registry); on completion it

@@ -149,6 +149,11 @@ instead — one bad take doesn't fail the whole job.
 
 ## `split_vocal_stems(audio_path, model=None, extra_stems=None) -> dict`
 
+**Only call this when the user's current request explicitly asks for
+stems — never proactively, and never just because it was used earlier
+in the conversation.** A plain "generate a track" request is complete
+once `generate_vocal_track` finishes.
+
 Starts splitting a full mix into a vocals-only stem and an
 instrumental-only stem via `audio-separator`. **Returns immediately**
 with a `job_id` — poll `check_vocal_track_status` exactly as for
