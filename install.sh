@@ -20,6 +20,7 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
+PROJECT_ROOT="$(pwd)"
 
 echo "============================================================"
 echo "SongForge-MCP installer (ACE-Step 1.5 backend)"
@@ -121,6 +122,25 @@ fi
 ".venv/bin/python" -m pip install -r requirements.txt
 ".venv/bin/python" -m pip install -e "acestep/third_parts/nano-vllm"
 ".venv/bin/python" -m pip install -e . --no-deps
+
+# ---- GPU VRAM detection: pick the right-sized ACE-Step checkpoint for
+# this hardware, unless the user already configured one explicitly.
+# Never overwrites an existing SONGFORGE_ACESTEP_CHECKPOINT. Detection
+# failure (no GPU, non-NVIDIA, any error) changes nothing - falls back
+# to today's exact default, set in songforge_mcp_shared/constants.py.
+# "|| true" matters here: this script runs under `set -e`, and without
+# it a detection failure (a deliberately non-zero exit, per this
+# script's own contract) would abort the whole installer instead of
+# falling back gracefully.
+if [ -z "${SONGFORGE_ACESTEP_CHECKPOINT:-}" ] && detect_nvidia_gpu; then
+    DETECTED_CHECKPOINT="$(".venv/bin/python" "$PROJECT_ROOT/scripts/detect_gpu_checkpoint.py")" || true
+    if [ -n "${DETECTED_CHECKPOINT:-}" ]; then
+        echo "Detected GPU - using ACE-Step checkpoint: $DETECTED_CHECKPOINT"
+        export SONGFORGE_ACESTEP_CHECKPOINT="$DETECTED_CHECKPOINT"
+    else
+        echo "GPU VRAM detection unavailable - using ACE-Step's default checkpoint selection."
+    fi
+fi
 popd >/dev/null
 
 # ---- Step 5: stem separator - isolated venv, unrelated dependency needs ----
@@ -201,6 +221,9 @@ echo "Done."
 echo "  SONGFORGE_ACESTEP_HOME     = $ACESTEP_DEST"
 echo "  SONGFORGE_SEPARATOR_PYTHON = $SEPARATOR_HOME/bin/python"
 echo "  SONGFORGE_YTDLP_PYTHON     = $YTDLP_PYTHON"
+if [ -n "${SONGFORGE_ACESTEP_CHECKPOINT:-}" ]; then
+    echo "  SONGFORGE_ACESTEP_CHECKPOINT = $SONGFORGE_ACESTEP_CHECKPOINT"
+fi
 echo
 echo "Add these to your shell profile (~/.bashrc, ~/.zshrc, etc.) and restart"
 echo "your terminal / Claude Desktop for them to take effect:"
@@ -208,6 +231,9 @@ echo
 echo "  export SONGFORGE_ACESTEP_HOME=\"$ACESTEP_DEST\""
 echo "  export SONGFORGE_SEPARATOR_PYTHON=\"$SEPARATOR_HOME/bin/python\""
 echo "  export SONGFORGE_YTDLP_PYTHON=\"$YTDLP_PYTHON\""
+if [ -n "${SONGFORGE_ACESTEP_CHECKPOINT:-}" ]; then
+    echo "  export SONGFORGE_ACESTEP_CHECKPOINT=\"$SONGFORGE_ACESTEP_CHECKPOINT\""
+fi
 echo
 echo "First real generation will trigger ACE-Step's ~28GB checkpoint download"
 echo "(XL-SFT + 5Hz LM + VAE) - this only happens once."
