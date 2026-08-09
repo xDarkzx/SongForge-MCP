@@ -1,7 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
+- **Fixed a real regression: `split_vocal_stems` could get called when
+  the user never asked for stems.** The "only split when explicitly
+  asked" rule already existed in the injected instructions and in
+  `generate_vocal_track`'s own docstring (about not calling this other
+  tool) — but `split_vocal_stems`' own docstring never carried that gate
+  itself, only mechanical/technical description. That gap predates
+  0.4.0, but 0.4.0 dramatically expanded this tool's docstring
+  (`extra_stems`, drums/bass/guitar/piano, Suno-style framing), making
+  it far more salient to a model scanning available tools with nothing
+  in its own text telling it to hold back — which is when this was
+  actually observed happening. Both `split_vocal_stems`' docstring and
+  `generate_vocal_track`'s `split_stems` param docstring now explicitly
+  gate on the user's current request having actually asked, not on the
+  model's own judgment or an earlier request in the same conversation.
 - **Both installers now auto-detect GPU VRAM and pick the right-sized
   ACE-Step checkpoint** (`scripts/detect_gpu_checkpoint.py`), instead of
   always targeting the ~28GB XL-SFT checkpoint regardless of hardware.
