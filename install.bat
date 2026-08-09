@@ -70,6 +70,23 @@ if errorlevel 1 (
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 ".venv\Scripts\python.exe" -m pip install -e "acestep\third_parts\nano-vllm"
 ".venv\Scripts\python.exe" -m pip install -e . --no-deps
+
+REM ---- GPU VRAM detection: pick the right-sized ACE-Step checkpoint for
+REM this hardware, unless the user already configured one explicitly.
+REM Never overwrites an existing SONGFORGE_ACESTEP_CHECKPOINT. Detection
+REM failure (no GPU, non-NVIDIA, any error) changes nothing - falls back
+REM to today's exact default, set in songforge_mcp_shared/constants.py.
+if "%SONGFORGE_ACESTEP_CHECKPOINT%"=="" (
+    set "DETECTED_CHECKPOINT="
+    for /f "delims=" %%C in ('".venv\Scripts\python.exe" "%~dp0scripts\detect_gpu_checkpoint.py"') do set "DETECTED_CHECKPOINT=%%C"
+    if not "!DETECTED_CHECKPOINT!"=="" (
+        echo Detected GPU - using ACE-Step checkpoint: !DETECTED_CHECKPOINT!
+        setx SONGFORGE_ACESTEP_CHECKPOINT "!DETECTED_CHECKPOINT!"
+        set "SONGFORGE_ACESTEP_CHECKPOINT=!DETECTED_CHECKPOINT!"
+    ) else (
+        echo GPU VRAM detection unavailable - using ACE-Step's default checkpoint selection.
+    )
+)
 popd
 
 setx SONGFORGE_ACESTEP_HOME "%ACESTEP_DEST%"
@@ -169,6 +186,9 @@ echo Done.
 echo   SONGFORGE_ACESTEP_HOME     = %ACESTEP_DEST%
 echo   SONGFORGE_SEPARATOR_PYTHON = %SEPARATOR_HOME%\Scripts\python.exe
 echo   SONGFORGE_YTDLP_PYTHON     = %~dp0.venv\Scripts\python.exe
+if not "%SONGFORGE_ACESTEP_CHECKPOINT%"=="" (
+    echo   SONGFORGE_ACESTEP_CHECKPOINT = %SONGFORGE_ACESTEP_CHECKPOINT%
+)
 echo.
 echo These are now set as permanent user environment variables (setx).
 echo Restart your terminal / Claude Desktop for them to take effect.
