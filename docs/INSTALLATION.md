@@ -13,15 +13,16 @@ not this project's own estimate.
 | OS | Windows, Linux, or macOS |
 | Python | 3.11 or 3.12 for the ACE-Step checkout specifically (this server's own venv is more permissive, but ACE-Step itself requires 3.11-3.12) |
 | GPU | An NVIDIA CUDA GPU is what this project's installers target and what has actually been tested. ACE-Step 1.5 also supports AMD ROCm, Intel XPU, Apple Silicon (MPS), and CPU-only — but `install.bat`/`install.sh` don't set those up automatically; see ACE-Step's own `docs/en/INSTALL.md` if you need one of them |
-| VRAM | This project is configured to use the **XL-SFT** model (higher quality than the smaller 2B model) — ACE-Step's own docs put that at **≥12GB VRAM with CPU offload + quantization, ≥20GB for it to run without offload** (their GPU_COMPATIBILITY.md tier table calls 12-16GB "marginal" for XL specifically). Below ~12GB VRAM, expect either failures or a very degraded/offloaded configuration — a smaller 2B-class model would be a better fit for that hardware, which isn't what this installer sets up |
+| VRAM | Both installers now detect available VRAM automatically (`scripts/detect_gpu_checkpoint.py`, run right after ACE-Step's own venv/torch install) and pick the right-sized checkpoint for it, setting `SONGFORGE_ACESTEP_CHECKPOINT` accordingly — **below 8GB**: `acestep-v15-turbo` (2B), **8-20GB**: `acestep-v15-sft` (2B), **20GB+**: `acestep-v15-xl-sft` (4B, this project's original hardcoded default). This never overrides a `SONGFORGE_ACESTEP_CHECKPOINT` you've already set yourself, and any detection failure (no GPU, non-NVIDIA, any error) falls back to the XL-SFT default unchanged — see `docs/2026-08-03-gpu-checkpoint-detection-design.md` for the full reasoning behind each threshold |
 | Disk | ~40GB free is checked by the installer before it proceeds — the XL-SFT checkpoint alone is ~28GB and downloads on first generation, on top of PyTorch/CUDA and this project's other dependencies |
 | No GPU at all | Both installers detect the absence of an NVIDIA GPU and fall back to CPU builds so the install itself won't fail, but this has not been performance-tested by this project — expect generation to be dramatically slower, likely impractically so for the XL-SFT configuration these installers set up |
 | `ffmpeg` on PATH | Needed for `reference_youtube_url`/`remix_source_youtube_url` (yt-dlp's audio extraction) and for `edit_audio_track`'s mp3 output (soundfile can only write wav/flac directly). Not installed by either installer — get it from [ffmpeg.org](https://ffmpeg.org/download.html) or your package manager (`winget install ffmpeg`, `apt install ffmpeg`, `brew install ffmpeg`) if those features error out. |
 
-If your hardware doesn't meet the VRAM guidance above, running ACE-Step
-1.5 directly (outside this server) with a smaller model and its own
-GPU-tier auto-configuration is a better starting point than trying to
-force the XL-SFT setup this installer targets.
+Detection requires an NVIDIA GPU (same as the rest of this installer) —
+on AMD/Intel/Apple Silicon/no-GPU hardware, detection fails silently and
+you fall back to the XL-SFT default regardless of actual VRAM. Running
+ACE-Step 1.5 directly (outside this server) with its own GPU-tier
+auto-configuration remains the better starting point for that hardware.
 
 ## Installing
 

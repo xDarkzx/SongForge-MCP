@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **Both installers now auto-detect GPU VRAM and pick the right-sized
+  ACE-Step checkpoint** (`scripts/detect_gpu_checkpoint.py`), instead of
+  always targeting the ~28GB XL-SFT checkpoint regardless of hardware.
+  Confirmed against ACE-Step's own install docs that 8GB cards were
+  simply locked out before this — now: below 8GB gets `acestep-v15-turbo`
+  (2B), 8-20GB gets `acestep-v15-sft` (2B), 20GB+ keeps the original
+  `acestep-v15-xl-sft` (4B) default. Never overrides an explicitly-set
+  `SONGFORGE_ACESTEP_CHECKPOINT`, and any detection failure changes
+  nothing — falls back to today's exact default.
+
 ## 0.4.0
 
 - **Added multi-stem separation** — `split_vocal_stems` now takes an
