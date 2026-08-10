@@ -1,10 +1,11 @@
 import os
 import platform
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from songforge_mcp.separator_client import SeparatorClient
+from songforge_mcp.separator_client import SeparatorClient, _model_tag
 from songforge_mcp_shared import constants
 from songforge_mcp_shared.error_codes import ErrorCode, SongForgeMCPError
 
@@ -50,7 +51,7 @@ def test_separate_is_idempotent_and_skips_subprocess_when_stems_exist(tmp_path, 
     input_path = tmp_path / "render.wav"
     input_path.write_text("fake audio")
 
-    stems_dir = tmp_path / "output" / "stems" / "vocals_mel_band_roformer_ckpt"
+    stems_dir = tmp_path / "output" / "stems" / _model_tag("vocals_mel_band_roformer.ckpt")
     stems_dir.mkdir(parents=True)
     existing_vocals = stems_dir / "render_(Vocals)_vocals_mel_band_roformer.wav"
     existing_instrumental = stems_dir / "render_(Instrumental)_vocals_mel_band_roformer.wav"
@@ -78,7 +79,7 @@ def test_separate_different_model_does_not_reuse_other_models_cached_stems(tmp_p
     input_path = tmp_path / "render.wav"
     input_path.write_text("fake audio")
 
-    stems_dir = tmp_path / "output" / "stems" / "vocals_mel_band_roformer_ckpt"
+    stems_dir = tmp_path / "output" / "stems" / _model_tag("vocals_mel_band_roformer.ckpt")
     stems_dir.mkdir(parents=True)
     (stems_dir / "render_(Vocals)_vocals_mel_band_roformer.wav").write_text("fake vocals a")
     (stems_dir / "render_(Instrumental)_vocals_mel_band_roformer.wav").write_text("fake instrumental a")
@@ -104,6 +105,48 @@ def test_separate_different_model_does_not_reuse_other_models_cached_stems(tmp_p
 
     assert "cmd" in called, "a different model must re-run separation, not reuse the other model's cached stems"
     assert "model_bs_roformer_ep_368_sdr_12_9628_ckpt" in result["vocals_path"]
+
+
+def test_separate_changed_quality_settings_do_not_reuse_old_cached_stems(tmp_path, monkeypatch):
+    # Regression test for a real bug: raising the project's overlap/shift
+    # defaults did not change the cache directory name, so a file already
+    # separated under the OLD settings was silently returned as if it had
+    # been generated with the new ones. Same model, same source file -
+    # only the quality settings differ.
+    monkeypatch.setattr(constants.Paths, "OUTPUT_DIR", str(tmp_path / "output"))
+    python_exe = _make_fake_venv(tmp_path)
+
+    input_path = tmp_path / "render.wav"
+    input_path.write_text("fake audio")
+
+    # Stems cached under the OLD (pre-change) settings.
+    monkeypatch.setattr(constants.Separator, "MDXC_OVERLAP", 8)
+    old_stems_dir = tmp_path / "output" / "stems" / _model_tag("vocals_mel_band_roformer.ckpt")
+    old_stems_dir.mkdir(parents=True)
+    (old_stems_dir / "render_(Vocals)_vocals_mel_band_roformer.wav").write_text("old settings vocals")
+    (old_stems_dir / "render_(Instrumental)_vocals_mel_band_roformer.wav").write_text("old settings instrumental")
+
+    called = {}
+
+    def fake_run(cmd, **kwargs):
+        called["cmd"] = cmd
+        out_dir = cmd[cmd.index("--output_dir") + 1]
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "render_(Vocals)_vocals_mel_band_roformer.wav"), "w") as f:
+            f.write("new settings vocals")
+        with open(os.path.join(out_dir, "render_(Instrumental)_vocals_mel_band_roformer.wav"), "w") as f:
+            f.write("new settings instrumental")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("songforge_mcp.separator_client.subprocess.run", fake_run)
+
+    # Now simulate the settings having been raised (the real change just made).
+    monkeypatch.setattr(constants.Separator, "MDXC_OVERLAP", 16)
+    client = SeparatorClient(separator_venv_python=python_exe)
+    result = client.separate(str(input_path), model_filename="vocals_mel_band_roformer.ckpt")
+
+    assert "cmd" in called, "changed quality settings must re-run separation, not reuse stems cached under the old settings"
+    assert "new settings vocals" in Path(result["vocals_path"]).read_text()
 
 
 def test_separate_runs_subprocess_and_finds_output_when_no_existing_stems(tmp_path, monkeypatch):
@@ -310,7 +353,7 @@ def test_separate_extra_stems_is_idempotent(tmp_path, monkeypatch):
     input_path = tmp_path / "render.wav"
     input_path.write_text("fake audio")
 
-    stems_dir = tmp_path / "output" / "stems" / "htdemucs_6s_yaml"
+    stems_dir = tmp_path / "output" / "stems" / _model_tag("htdemucs_6s.yaml")
     stems_dir.mkdir(parents=True)
     for label in ["Vocals", "Drums", "Bass", "Guitar", "Piano", "Other"]:
         (stems_dir / f"render_({label})_htdemucs_6s.wav").write_text(f"fake {label}")
@@ -333,7 +376,7 @@ def test_separate_extra_stems_reruns_when_existing_stems_are_incomplete(tmp_path
     input_path = tmp_path / "render.wav"
     input_path.write_text("fake audio")
 
-    stems_dir = tmp_path / "output" / "stems" / "htdemucs_6s_yaml"
+    stems_dir = tmp_path / "output" / "stems" / _model_tag("htdemucs_6s.yaml")
     stems_dir.mkdir(parents=True)
     # Only one stray file present - e.g. a previous run was killed mid-write.
     (stems_dir / "render_(Drums)_htdemucs_6s.wav").write_text("fake drums")
@@ -382,3 +425,66 @@ def test_separate_extra_stems_raises_when_input_file_missing(tmp_path):
     with pytest.raises(SongForgeMCPError) as exc_info:
         client.separate_extra_stems(str(tmp_path / "does_not_exist.wav"))
     assert exc_info.value.code == ErrorCode.FILE_NOT_FOUND
+
+
+def test_separate_passes_quality_overlap_and_shift_flags(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants.Paths, "OUTPUT_DIR", str(tmp_path / "output"))
+    python_exe = _make_fake_venv(tmp_path)
+
+    input_path = tmp_path / "render.wav"
+    input_path.write_text("fake audio")
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        out_dir = cmd[cmd.index("--output_dir") + 1]
+        os.makedirs(out_dir, exist_ok=True)
+        for label in ["Vocals", "Instrumental"]:
+            with open(os.path.join(out_dir, f"render_({label})_vocals_mel_band_roformer.wav"), "w") as f:
+                f.write(f"fake {label}")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("songforge_mcp.separator_client.subprocess.run", fake_run)
+
+    client = SeparatorClient(separator_venv_python=python_exe)
+    client.separate(str(input_path))
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--mdxc_overlap") + 1] == str(constants.Separator.MDXC_OVERLAP)
+    assert cmd[cmd.index("--mdx_overlap") + 1] == str(constants.Separator.MDX_OVERLAP)
+    assert cmd[cmd.index("--demucs_overlap") + 1] == str(constants.Separator.DEMUCS_OVERLAP)
+    assert cmd[cmd.index("--demucs_shifts") + 1] == str(constants.Separator.DEMUCS_SHIFTS)
+    # Deliberately not raising segment_size - see Separator constant's
+    # comment on why (VRAM risk on low-end GPUs the installer specifically
+    # detects and accommodates elsewhere in this project).
+    assert "--mdxc_segment_size" not in cmd
+    assert "--demucs_segment_size" not in cmd
+
+
+def test_separate_extra_stems_passes_quality_overlap_and_shift_flags(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants.Paths, "OUTPUT_DIR", str(tmp_path / "output"))
+    python_exe = _make_fake_venv(tmp_path)
+
+    input_path = tmp_path / "render.wav"
+    input_path.write_text("fake audio")
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        out_dir = cmd[cmd.index("--output_dir") + 1]
+        os.makedirs(out_dir, exist_ok=True)
+        for label in ["Vocals", "Drums", "Bass", "Guitar", "Piano", "Other"]:
+            with open(os.path.join(out_dir, f"render_({label})_htdemucs_6s.wav"), "w") as f:
+                f.write(f"fake {label}")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("songforge_mcp.separator_client.subprocess.run", fake_run)
+
+    client = SeparatorClient(separator_venv_python=python_exe)
+    client.separate_extra_stems(str(input_path))
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--demucs_overlap") + 1] == str(constants.Separator.DEMUCS_OVERLAP)
+    assert cmd[cmd.index("--demucs_shifts") + 1] == str(constants.Separator.DEMUCS_SHIFTS)

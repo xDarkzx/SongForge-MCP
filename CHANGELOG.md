@@ -1,5 +1,189 @@
 # Changelog
 
+## Unreleased
+
+- **Tuned Omnizart's Piano model via a systematic threshold sweep, not a
+  guess**: scored `OnsetTh` values 4 (Omnizart's own stock default) down
+  to 1.5 against independent onset detection on real audio (not the
+  transcription model itself, to avoid circular validation). Stock
+  default recalled 76% of real onsets; 2.5 recalled 80% for a contained
+  increase in likely-spurious extra notes (50→62 out of ~90 onsets);
+  pushing further to 1.5 only gained 2 more recall points for a much
+  steeper false-positive cost (78 extras) - real, measured diminishing
+  returns past 2.5, confirmed rather than assumed. Also characterized the
+  remaining gap: notes still missed even at the most permissive setting
+  tested average meaningfully lower onset strength than caught ones and
+  mostly occur while several other notes are already sustaining
+  (polyphonic masking) - a genuine model-capability limit, not a
+  settings problem, so tuning stopped at 2.5 rather than continuing to
+  chase full recall.
+  - `scripts/install_omnizart.py` now creates a `music_piano_tuned`
+    checkpoint (a copy of the stock Piano checkpoint with `OnsetTh`
+    lowered to 2.5) as part of installation - durable and reproducible,
+    not a one-off manual edit.
+  - `omnizart_client._resolve_model_path` transparently resolves
+    `model_mode="Piano"` to this tuned checkpoint's full path when it
+    exists, falling back to Omnizart's own stock "Piano" mode otherwise
+    (e.g. an environment installed before this tuning existed) - no
+    caller-visible change needed to benefit from it.
+  - Real cache-correctness bug caught and fixed before it could ship:
+    the settings-tag idempotency key was hashing the caller-supplied
+    `model_mode` string ("Piano"), not what actually runs - since
+    "Piano" resolves to a different real checkpoint depending on
+    whether the tuned variant exists, that would have been the exact
+    same stale-cache bug class already found and fixed twice elsewhere
+    this release (`separator_client._model_tag`,
+    `midi_transcription._settings_tag`). The cache key now hashes the
+    *resolved* checkpoint path instead.
+- **Added `transcribe_instrumental_to_midi_omnizart`**: a second, genuinely
+  different transcription engine (Omnizart) alongside the existing
+  basic-pitch tool, not a re-tuned version of the same one. Added after a
+  real, direct side-by-side listening comparison on this project's own
+  material found Omnizart's piano model dramatically more accurate than
+  basic-pitch on a real song - this is a confirmed result, not a
+  theoretical preference. Optional and additive: nothing about the
+  existing `transcribe_instrumental_to_midi` tool changed, and this new
+  one only works if `SONGFORGE_OMNIZART_PYTHON` is configured (run the new
+  `scripts/install_omnizart.py`, wired as an interactive opt-in step into
+  both installers - genuinely heavier and more fragile to install than
+  the rest of this project's dependencies, several compatibility patches
+  are applied automatically, see that script's own docstring for why).
+  - `songforge_mcp/omnizart_client.py`: chunks the audio before handing it
+    to Omnizart rather than transcribing the whole file in one pass - this
+    is not a performance optimization, it fixes a real, confirmed
+    correctness bug. Omnizart's own note-detection density collapses over
+    the course of a long file: measured directly on a real 187s song, 5.4
+    notes/sec in the first 30 seconds vs. 0.03 notes/sec in the last 30
+    seconds of the SAME file; re-running that same late section as a
+    short standalone clip recovered real notes that were missing when
+    embedded deep in the long file (48 -> 67 notes for one 90-120s
+    window, confirmed by direct A/B test). No post-processing can recover
+    a note that was never detected - chunking before transcription is the
+    actual fix, not a cleanup step after.
+  - Reuses `_merge_close_notes`/`_close_gaps` directly from
+    `midi_transcription.py` on the stitched output - the same
+    non-destructive cleanup already proven correct for basic-pitch.
+  - Adds song-key detection from the transcribed notes (reusing
+    `audio_analysis.detect_key`'s existing Krumhansl-Schmuckler
+    correlation on a duration-weighted pitch-class histogram instead of
+    audio chroma) and REPORTS (does not remove) notes outside the
+    detected key. Deliberately not auto-deleted: distinguishing a real
+    accidental/passing tone from a genuine transcription error requires
+    actually listening to it, and this project's own testing found that
+    judging note correctness from statistics alone, without listening,
+    produces wrong calls - that judgment stays with whoever reviews the
+    result.
+  - Same settings-tag idempotency pattern as `transcribe_to_midi` (see
+    below) - a fresh bug wasn't reintroduced this time.
+- **Fixed a real, confirmed tempo-measurement bug via `analyze_audio()`**:
+  a real song's actual 155 BPM measured as 86.1 BPM via librosa, and
+  separately as 76.9-84.5 BPM via madmom's neural beat tracker - two
+  methodologically different algorithms landing on the same wrong answer,
+  both close to half the true tempo. This is librosa's own documented
+  failure mode (also noted in `beat_alignment.py`'s
+  `_correct_octave_ambiguity`): fast tempos get under-detected toward a
+  slower "typical" prior, one-directionally, not a random ambiguity.
+  `analyze_audio()` now flags `bpm_low_confidence=True` and surfaces
+  `bpm_alt` (exactly double) plus an explanatory `bpm_note` when the raw
+  reading falls in the confirmed risk band (75-105 BPM) - reported, not
+  silently auto-corrected, since there's no trusted reference to pick the
+  right one automatically the way `beat_alignment.py` can.
+- **Corrected an over-tightened regression in this same Unreleased
+  section's transcription defaults**: raising `onset_threshold`/
+  `frame_threshold`/`minimum_note_length_ms` to fight scattered/
+  fragmented notes was confirmed, via direct inspection of real
+  transcription output plus a real listening test, to have gone too far
+  in the other direction - roughly half of the actual musical content
+  was being silently discarded, not just fragmented. Root cause: these
+  three are enforced INSIDE basic-pitch itself, before this module's own
+  cleanup code (`_merge_close_notes`/`_close_gaps`) ever sees the output
+  - a note filtered out there is gone permanently and unrecoverable,
+  unlike this module's own post-processing, which only ever consolidates
+  or extends notes that already exist. Reverted to values only mildly
+  above basic-pitch's own defaults (`onset_threshold` 0.6→0.55,
+  `frame_threshold` 0.4→0.32) and `minimum_note_length_ms` now set BELOW
+  basic-pitch's own default (180→90ms, vs. its 127.7ms default) so a
+  fast, real, short note is never discarded at the model level -
+  fragmentation cleanup is now leaned on `_merge_close_notes`/
+  `_close_gaps` (non-destructive) rather than a stricter model-level
+  filter (destructive) to do more of that work. `midi_tools.py`'s tool
+  signature now imports these defaults directly from `midi_transcription.py`
+  instead of duplicating literal values, specifically so this class of
+  drift (the tool's exposed defaults silently going stale relative to the
+  module's real ones) can't happen again.
+- **Fixed the same stale-cache class of bug in `transcribe_to_midi`**
+  that was just found and fixed in the separator: the MIDI output path
+  was a fixed filename derived only from the audio filename, with no
+  settings/version tag at all. Any `.mid` file already transcribed for a
+  song - including one transcribed under this module's OWN OLDER
+  defaults, before a tuning pass improved them - looked identical to the
+  idempotency check as a fresh default-settings result, and got served
+  back forever regardless of how much the code improved. `transcribe_to_midi`
+  now folds a hash of the actual settings values (`_settings_tag`) into
+  the output filename, same fix pattern as `separator_client.py`'s
+  `_model_tag`: a settings change - including this module's own defaults
+  changing in a future update - is now always a different, fresh cache
+  entry instead of silently reusing old output. Also fixes a related bug
+  from the same idempotency logic: a custom-settings call used to
+  overwrite the default-settings cache at the same path, so a later
+  plain default call could get back someone else's custom-settings
+  result. Custom and default settings now always get separate files.
+- **Raised stem-separation quality settings** (`separator_client.py`):
+  `separate`/`separate_extra_stems` were calling `audio-separator` with
+  only `--output_dir`/`--output_format`/`--model_filename`, leaving every
+  quality-affecting parameter at the CLI's own fast-mode defaults -
+  never deliberately chosen for this project. Checked
+  `audio-separator --help` directly: low overlap in particular is a
+  textbook cause of audible seams at chunk boundaries in this kind of
+  windowed inference, matching real reports of "artifacty, vocoder-like"
+  isolated stems closely. Now passes `--mdxc_overlap` (8→16),
+  `--mdx_overlap` and `--demucs_overlap` (0.25→0.5), and
+  `--demucs_shifts` (2→4) - all independently env-overridable
+  (`SONGFORGE_SEPARATOR_{MDXC,MDX,DEMUCS}_OVERLAP`,
+  `SONGFORGE_SEPARATOR_DEMUCS_SHIFTS`), same pattern as
+  `SONGFORGE_SEPARATOR_MODEL`. Deliberately does NOT raise segment_size
+  even though the tool's docs call it a quality lever too - that one
+  raises peak VRAM during separation and could reintroduce an OOM on the
+  same low-VRAM cards the GPU auto-detection installer work exists to
+  support, whereas more overlap/shifts costs time, not memory.
+  - **Also fixed a real bug this surfaced immediately**: `separate`/
+    `separate_extra_stems`' idempotency cache keyed only on
+    (source file, model) via the output directory name - raising the
+    settings above didn't change that name, so a file already separated
+    under the OLD settings was silently returned as if generated with the
+    new ones. `_model_tag` now folds the active overlap/shift settings
+    into the same per-model cache directory tag, so a settings change is
+    a different cache bucket exactly like a different model already was.
+- **Fixed genuinely bad `transcribe_instrumental_to_midi` output**: real
+  transcriptions were producing thousands of short, scattered notes with
+  gaps between them, including on a solo isolated piano stem (not a
+  mixing/bleed problem). Root causes, both now fixed in
+  `midi_transcription.py`:
+  - `predict()` was called with basic-pitch's own defaults
+    (`onset_threshold=0.5`, `frame_threshold=0.3`,
+    `minimum_note_length=127.7ms`), tuned for clean solo audio. Frame-level
+    pitch confidence dips below threshold mid-note (sustain decay,
+    vibrato) and climbs back a moment later — reported as several short,
+    gapped notes instead of one sustained one. Thresholds raised
+    (`onset_threshold=0.6`, `frame_threshold=0.4`,
+    `minimum_note_length=180ms`) to suppress most of this at the model
+    level, plus a new `_merge_close_notes` pass that glues same-pitch
+    fragments separated by <60ms back into one note.
+  - `midi_tempo` was hardcoded to basic-pitch's default of 120 regardless
+    of the audio's real tempo — a mismatch there makes a transcription's
+    notes look off the beat grid once imported into a DAW project at the
+    song's actual BPM, even though the note timing itself was accurate
+    in seconds all along. Now measured for real via the existing
+    `audio_analysis.analyze_audio` (librosa `beat_track`) and passed
+    through; falls back to 120 only if measurement itself fails.
+  - Added `_close_gaps`, applied to the bass and melody split tracks
+    (not chords, which commonly have real, intentional space between
+    stabs): closes gaps up to 350ms between consecutive notes so a
+    bassline or piano line reads as legato instead of staccato, without
+    erasing genuine longer rests.
+  - `transcribe_instrumental_to_midi`'s result now also includes
+    `measured_bpm`.
+
 ## 0.5.0
 
 - **Fixed a real regression: `split_vocal_stems` could get called when

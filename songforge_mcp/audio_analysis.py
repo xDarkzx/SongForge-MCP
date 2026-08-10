@@ -150,13 +150,41 @@ def compare_vocal_pitch_range(candidate: dict, reference: dict) -> dict:
     }
 
 
+# librosa.beat.beat_track's own documented failure mode (also confirmed
+# independently in beat_alignment.py's _correct_octave_ambiguity, and
+# again directly during this project's own testing: a real song's known
+# 155 BPM measured as 86.1 BPM via librosa AND as 76.9-84.5 BPM via
+# madmom's separately-trained neural beat tracker - two methodologically
+# different algorithms landing on the same wrong answer, both close to
+# half the true tempo). The bias is one-directional: fast tempos get
+# UNDER-detected toward a slower "typical" prior, not the reverse - so a
+# raw reading in this band is specifically the signature of a real tempo
+# that's roughly double it, not a random ambiguity in both directions.
+# Band chosen so its doubled range (150-210) covers the documented "150+
+# BPM" risk zone without flagging confidently-slow material (a real
+# 60-70 BPM ballad has no comparable evidence of being mismeasured).
+_OCTAVE_AMBIGUITY_LOW = 75.0
+_OCTAVE_AMBIGUITY_HIGH = 105.0
+
+
 def analyze_audio(path: str) -> dict:
     """Measures real tempo and overall key/mode from an audio file. Used
     to auto-populate generate_vocal_track's advanced_settings
     ("BPM (Beats Per Minute)", "Key") instead of guessing either by ear or
     by convention. Does not attempt chord-progression detection - see
     module docstring for why; look up the real song's chord chart instead
-    when one exists."""
+    when one exists.
+
+    bpm is a real DSP measurement, not a guess - but tempo tracking has a
+    real, confirmed failure mode of its own (see _OCTAVE_AMBIGUITY_LOW/
+    HIGH above): a raw reading between them is reported alongside
+    bpm_alt (exactly double it) and bpm_low_confidence=True, because
+    that band is specifically where this project has confirmed real
+    tempos get mismeasured as roughly half their true value. This is
+    surfaced, not silently resolved - picking the wrong one automatically
+    without a trusted reference (unlike beat_alignment.py's
+    _correct_octave_ambiguity, which has one) would just swap a visible
+    uncertainty for a silent wrong answer."""
     try:
         y, sr = librosa.load(path, sr=_ANALYSIS_SR, mono=True)
     except Exception as e:
@@ -170,10 +198,23 @@ def analyze_audio(path: str) -> dict:
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
     key, mode, confidence = detect_key(chroma.mean(axis=1))
 
-    return {
+    low_confidence = _OCTAVE_AMBIGUITY_LOW <= tempo <= _OCTAVE_AMBIGUITY_HIGH
+    result = {
         "bpm": round(tempo, 1),
         "key": key,
         "mode": mode,
         "key_confidence": round(confidence, 3),
         "duration_seconds": round(len(y) / sr, 1),
+        "bpm_low_confidence": low_confidence,
     }
+    if low_confidence:
+        result["bpm_alt"] = round(tempo * 2, 1)
+        result["bpm_note"] = (
+            f"Measured {round(tempo, 1)} BPM, but this falls in a known "
+            f"tempo-tracker risk band where a real fast tempo commonly gets "
+            f"under-detected as roughly half its true value (confirmed on "
+            f"real material in this project - see analyze_audio's "
+            f"docstring). If this seems too slow for the actual song, the "
+            f"real tempo may be bpm_alt instead."
+        )
+    return result

@@ -148,8 +148,40 @@ def test_analyze_audio_measures_tempo_key_and_duration(tmp_path):
 
     result = analyze_audio(str(path))
 
-    assert set(result) == {"bpm", "key", "mode", "key_confidence", "duration_seconds"}
+    assert set(result) == {
+        "bpm", "key", "mode", "key_confidence", "duration_seconds", "bpm_low_confidence",
+    }
     assert abs(result["bpm"] - 120.0) < 10.0
     assert result["key"] == "C"
     assert result["mode"] == "major"
     assert result["duration_seconds"] == 8.0
+    # 120 BPM is well above the octave-ambiguity risk band (75-105) -
+    # confirmed a real, correctly-measured tempo, not a candidate for the
+    # tempo-under-detection failure mode.
+    assert result["bpm_low_confidence"] is False
+    assert "bpm_alt" not in result
+
+
+def test_analyze_audio_flags_bpm_in_octave_ambiguity_band(tmp_path):
+    path = tmp_path / "synthetic_song_90bpm.wav"
+    _write_synthetic_song(path, bpm=90.0, duration_seconds=8.0)
+
+    result = analyze_audio(str(path))
+
+    # 90 BPM sits inside the confirmed risk band (75-105) where a real
+    # fast tempo commonly gets under-detected as roughly half its true
+    # value - this must be surfaced, not silently trusted.
+    assert result["bpm_low_confidence"] is True
+    assert abs(result["bpm_alt"] - result["bpm"] * 2) < 0.01
+    assert "bpm_note" in result and "bpm_alt" in result["bpm_note"]
+
+
+def test_analyze_audio_does_not_flag_bpm_outside_ambiguity_band(tmp_path):
+    path = tmp_path / "synthetic_song_60bpm.wav"
+    _write_synthetic_song(path, bpm=60.0, duration_seconds=8.0)
+
+    result = analyze_audio(str(path))
+
+    assert result["bpm_low_confidence"] is False
+    assert "bpm_alt" not in result
+    assert "bpm_note" not in result

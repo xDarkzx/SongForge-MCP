@@ -288,6 +288,26 @@ unrelated, independently-versioned dependencies; installing them into a
 shared environment in earlier testing produced silent version conflicts
 that were more expensive to diagnose than simply keeping them apart.
 
+## Why Omnizart runs in its own environment (and why it's optional)
+
+Same reasoning as separation, more acutely: Omnizart depends on `madmom`,
+which predates numpy 2.0's removal of deprecated scalar-type aliases
+(`np.float`/`np.int`/etc.) and Python 3.10's move of
+`collections.MutableSequence` into `collections.abc` - both hard
+`ImportError`s on this project's own environment. `scripts/install_omnizart.py`
+patches these automatically in Omnizart's own isolated venv rather than
+touching this project's dependency set at all. Genuinely more fragile to
+install than everything else here (also works around a Windows-only MSVC
+incompatibility in one of Omnizart's own dependencies, `vamp`, by skipping
+it - safe because that dependency is only used by Omnizart's chord/chroma
+submodule, not the pitched-instrument transcription this project actually
+calls; see that script's own docstring for the full detail on both). This
+is why it's an interactive opt-in during installation rather than a
+default step: `transcribe_instrumental_to_midi` (basic-pitch) works with
+zero extra setup; `transcribe_instrumental_to_midi_omnizart` is a real,
+confirmed quality upgrade on at least one tested song, but it's optional
+by design, not bundled by default.
+
 ## Package layout
 
 ```
@@ -296,18 +316,42 @@ songforge_mcp/
 ├── tool_registry.py         # Auto-discovers tools/ modules
 ├── acestep_client.py        # Playwright-driven ACE-Step integration
 ├── job_registry.py          # In-memory background job tracking for generation
-├── separator_client.py      # Stem separation via audio-separator
+├── shared_state.py          # Shared job registry instance used across tool modules
+├── separator_client.py      # Vocal/instrumental + multi-stem separation via audio-separator
+├── midi_transcription.py    # Audio-to-MIDI via basic-pitch, plus non-destructive
+│                             # cleanup (fragment merging, gap closing) reused by
+│                             # omnizart_client.py
+├── omnizart_client.py       # Audio-to-MIDI via Omnizart (alternative engine) -
+│                             # chunked transcription, tuned-checkpoint resolution
+├── audio_analysis.py        # Real BPM/key measurement (librosa) + vocal pitch-range
+│                             # analysis - not a guess, and not chord detection (see
+│                             # that module's own docstring for why)
+├── beat_alignment.py        # Tempo-matches and phase-locks an independently
+│                             # generated instrumental against a fixed vocal stem
+├── voice_reference_library.py  # Per-voice reference-clip management
 ├── youtube_reference.py     # Reference-audio download via yt-dlp
+├── media_player.py          # Local audio playback for the playback_tools MCP tools
 ├── instructions/
 │   └── 00_core.md           # Injected system-prompt instructions
-└── tools/                   # generate_vocal_track, check_vocal_track_status,
-                              # split_vocal_stems
+└── tools/                   # generate_tools, analysis_tools, audio_edit_tools,
+                              # midi_tools, separate_tools, track_management_tools,
+                              # voice_reference_tools, playback_tools
 
 songforge_mcp_shared/
-├── constants.py              # Paths, timeouts, safety limits
+├── constants.py              # Paths, timeouts, safety limits, per-feature settings
+│                              # (Separator, OmnizartTranscription, etc.)
 ├── error_codes.py            # SongForgeMCPError + ErrorCode
 └── protocol.py                # Input validation, output helpers
 ```
+
+Two isolated venvs live alongside the main one, each for a tool with
+dependencies that conflict with everything else (see "Why separation runs
+in its own environment" above, and `scripts/install_omnizart.py`'s own
+docstring for Omnizart's specific conflicts - an old dependency, madmom,
+that predates current Python/numpy):
+
+- `.separator_env/` — `audio-separator` (`SONGFORGE_SEPARATOR_PYTHON`)
+- `.omnizart_env/` — Omnizart, optional (`SONGFORGE_OMNIZART_PYTHON`)
 
 ## Design decisions carried over from v1
 

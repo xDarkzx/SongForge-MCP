@@ -5,9 +5,9 @@ pair, not two independent tools — see why in
 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#why-generation-is-a-startpoll-pair-not-one-blocking-call).
 Every job-based tool below (`generate_vocal_track`,
 `generate_vocal_track_takes`, `split_vocal_stems`, `analyze_reference_audio`,
-`transcribe_instrumental_to_midi`, `edit_audio_track`,
-`prepare_voice_reference`) shares the same `check_vocal_track_status`
-poll tool and job registry.
+`transcribe_instrumental_to_midi`, `transcribe_instrumental_to_midi_omnizart`,
+`edit_audio_track`, `prepare_voice_reference`) shares the same
+`check_vocal_track_status` poll tool and job registry.
 
 **No tool ever returns audio inline** — every result is a real,
 absolute file path plus small scalar metadata (durations, seeds,
@@ -328,7 +328,12 @@ is needed.
   `reference_audio_path` above).
 
 **Returns** `{"job_id": str}` — poll `check_vocal_track_status` exactly
-as for `generate_vocal_track`. On completion, returns `{"bpm", "key", "mode", "key_confidence", "duration_seconds"}`.
+as for `generate_vocal_track`. On completion, returns `{"bpm", "key", "mode", "key_confidence", "duration_seconds", "bpm_low_confidence"}`,
+plus `bpm_alt` and `bpm_note` when `bpm_low_confidence` is `True`. Real,
+confirmed failure mode: tempo tracking can under-detect a fast tempo as
+roughly half its true value — `bpm_low_confidence` flags when the raw
+`bpm` falls in that risk band (75-105) rather than silently trusting one
+number; `bpm_alt` is the doubled candidate to sanity-check by ear.
 
 **Raises** `SongForgeMCPError` — `FILE_NOT_FOUND`, `INVALID_PARAMETER`
 (not a real audio file).
@@ -361,6 +366,63 @@ tracks.
 **Raises** `SongForgeMCPError` — `FILE_NOT_FOUND`, `INVALID_PARAMETER`
 (path outside the output folder, not real audio), plus a transcription
 failure wraps the underlying model error.
+
+Also accepts tuning knobs (`onset_threshold`, `frame_threshold`,
+`minimum_note_length_ms`, `minimum_frequency`/`maximum_frequency`,
+`melodia_trick`, `merge_gap_seconds`, `legato_gap_seconds`,
+`bass_pitch_threshold`, `chord_polyphony_threshold`, `midi_tempo`) — the
+defaults are already tuned for clean output; see the tool's own docstring
+before raising `onset_threshold`/`frame_threshold`/`minimum_note_length_ms`
+specifically, a prior version of those defaults silently discarded real
+notes rather than cleaning up fragmentation.
+
+## `transcribe_instrumental_to_midi_omnizart(audio_path, model_mode="Piano", chunk_seconds=30, merge_gap_seconds=0.06, legato_gap_seconds=0.35, midi_tempo=None) -> dict`
+
+Same job as `transcribe_instrumental_to_midi`, via **Omnizart** instead of
+basic-pitch — a genuinely different transcription engine, not a re-tuned
+version of the same one. Confirmed via direct side-by-side listening on
+real material to be dramatically more accurate than basic-pitch on at
+least one real song's piano part. Optional: requires
+`SONGFORGE_OMNIZART_PYTHON` to be configured (`scripts/install_omnizart.py`,
+an interactive opt-in step in both installers — not installed by default).
+
+Runs Omnizart on short chunks of the audio rather than the whole file at
+once — not a performance choice, a fix for a confirmed bug where
+Omnizart's own note-detection density collapses over a long file. No
+per-instrument bass/melody/chords split (Omnizart's output doesn't have
+the register categories that relies on); applies the same
+merge/close-gap cleanup as the basic-pitch tool, and additionally detects
+the song's key and reports (does not remove) notes outside it.
+
+**Arguments**
+
+- `audio_path` *(required)* — a file this server previously produced.
+  Must be inside this server's own output folder.
+- `model_mode` — Omnizart's own mode name: `"Piano"` (dedicated piano
+  checkpoint), `"Pop"` (general/mixed instrumentation), or `"Stream"`.
+  `"Piano"` transparently resolves to a tuned checkpoint
+  (`OnsetTh` lowered from Omnizart's stock default via a systematic
+  sweep against independent onset detection - see CHANGELOG for the real
+  measured numbers) when `scripts/install_omnizart.py` has created one,
+  falling back to Omnizart's own stock Piano checkpoint otherwise - no
+  action needed to benefit from this, it's automatic.
+- `chunk_seconds` — length of each independently-transcribed chunk.
+  Default 30 is where the degradation-recovery was confirmed, not
+  exhaustively tuned.
+- `merge_gap_seconds` / `legato_gap_seconds` — same meaning as the
+  basic-pitch tool's identically-named arguments.
+- `midi_tempo` — explicit BPM override, same reasoning as the
+  basic-pitch tool (see `analyze_audio`'s known fast-tempo measurement
+  risk below).
+
+**Returns** `{"job_id": str}` — poll `check_vocal_track_status`. On
+completion, returns `midi_path`, `note_count`, `measured_bpm`,
+`chunk_count`, `detected_key` (e.g. `"C# minor"`, or `null`), and
+`off_scale_note_count`/`off_scale_notes` (a capped preview of notes
+outside the detected key — informational, not a claim they're wrong).
+
+**Raises** `SongForgeMCPError` — `OMNIZART_NOT_CONFIGURED` (not
+installed/configured), `FILE_NOT_FOUND`, `OMNIZART_TRANSCRIPTION_FAILED`.
 
 ## `get_midi_notes(midi_path, offset=0, max_results=500) -> dict`
 

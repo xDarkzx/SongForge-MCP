@@ -165,6 +165,23 @@ echo "Separator class for why these two specifically..."
 # ---- Step 6: yt-dlp (already a dependency of this server's own venv) ----
 YTDLP_PYTHON="$(pwd)/.venv/bin/python"
 
+# ---- Step 6b: Omnizart - optional alternative multi-instrument
+# transcription engine. Own isolated venv, same per-tool venv convention
+# as the separator step above. Interactive, unlike the separator step:
+# genuinely optional, heavier install (large checkpoints, several
+# compatibility patches applied automatically - see
+# scripts/install_omnizart.py for why).
+echo
+OMNIZART_PYTHON=""
+read -r -p "Install Omnizart (optional alternative multi-instrument MIDI transcription)? (y/n): " INSTALL_OMNIZART
+if [ "$INSTALL_OMNIZART" = "y" ] || [ "$INSTALL_OMNIZART" = "Y" ]; then
+    if ".venv/bin/python" "$PROJECT_ROOT/scripts/install_omnizart.py"; then
+        OMNIZART_PYTHON="$(pwd)/.omnizart_env/bin/python"
+    else
+        echo "Omnizart install failed - skipping. Basic-pitch transcription still works."
+    fi
+fi
+
 # ---- Step 7: Configure Claude Desktop ----
 SONGFORGE_EXE="$(pwd)/.venv/bin/songforge-mcp"
 echo
@@ -221,6 +238,9 @@ echo "Done."
 echo "  SONGFORGE_ACESTEP_HOME     = $ACESTEP_DEST"
 echo "  SONGFORGE_SEPARATOR_PYTHON = $SEPARATOR_HOME/bin/python"
 echo "  SONGFORGE_YTDLP_PYTHON     = $YTDLP_PYTHON"
+if [ -n "$OMNIZART_PYTHON" ]; then
+    echo "  SONGFORGE_OMNIZART_PYTHON = $OMNIZART_PYTHON"
+fi
 if [ -n "${SONGFORGE_ACESTEP_CHECKPOINT:-}" ]; then
     echo "  SONGFORGE_ACESTEP_CHECKPOINT = $SONGFORGE_ACESTEP_CHECKPOINT"
 fi
@@ -231,6 +251,9 @@ echo
 echo "  export SONGFORGE_ACESTEP_HOME=\"$ACESTEP_DEST\""
 echo "  export SONGFORGE_SEPARATOR_PYTHON=\"$SEPARATOR_HOME/bin/python\""
 echo "  export SONGFORGE_YTDLP_PYTHON=\"$YTDLP_PYTHON\""
+if [ -n "$OMNIZART_PYTHON" ]; then
+    echo "  export SONGFORGE_OMNIZART_PYTHON=\"$OMNIZART_PYTHON\""
+fi
 if [ -n "${SONGFORGE_ACESTEP_CHECKPOINT:-}" ]; then
     echo "  export SONGFORGE_ACESTEP_CHECKPOINT=\"$SONGFORGE_ACESTEP_CHECKPOINT\""
 fi

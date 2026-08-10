@@ -136,6 +136,7 @@ find everything it just installed:
 | `SONGFORGE_ACESTEP_HOME` | The ACE-Step 1.5 checkout |
 | `SONGFORGE_SEPARATOR_PYTHON` | The separator environment's Python interpreter |
 | `SONGFORGE_YTDLP_PYTHON` | This server's own Python interpreter (yt-dlp is installed alongside it) |
+| `SONGFORGE_OMNIZART_PYTHON` *(optional)* | The Omnizart environment's Python interpreter — only set if you opted into installing it (interactive prompt in both installers, or run `scripts/install_omnizart.py` directly later). Enables `transcribe_instrumental_to_midi_omnizart`, a second, more accurate (on real material tested so far) transcription engine alongside the default basic-pitch one. Genuinely heavier and more fragile to install than everything else here — several compatibility patches are applied automatically for an old dependency (madmom) that predates current Python/numpy; see the install script's own docstring for exactly what and why. |
 
 Two more, optional, control output location and which ACE-Step
 checkpoint gets used:

@@ -12,6 +12,7 @@ venv/
 .venv/
 env/
 .separator_env/
+.omnizart_env/
 
 # IDE
 .vscode/

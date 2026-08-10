@@ -31,10 +31,31 @@ from songforge_mcp_shared.error_codes import ErrorCode, SongForgeMCPError
 _MODEL_TAG_RE = re.compile(r"[^A-Za-z0-9]+")
 
 
+def _quality_tag() -> str:
+    """Filesystem-safe tag encoding the current overlap/shift quality
+    settings (Separator.MDXC_OVERLAP etc.), folded into _model_tag's
+    output below.
+
+    Real, confirmed failure mode this fixes: separate()/separate_extra_stems()
+    cache purely on (source file, model) via the output directory name.
+    Raising the project's overlap/shift defaults for better quality did
+    NOT change that directory name, so a file already separated under the
+    OLD settings got silently returned as if it were generated with the
+    new ones — no way to tell the two apart on disk. Folding the actual
+    settings into the same per-model tag makes a settings change what it
+    should always have been: a different cache bucket, exactly like a
+    different model already is."""
+    raw = f"ov{Separator.MDXC_OVERLAP}-{Separator.MDX_OVERLAP}-{Separator.DEMUCS_OVERLAP}-sh{Separator.DEMUCS_SHIFTS}"
+    return _MODEL_TAG_RE.sub("_", raw).strip("_")
+
+
 def _model_tag(model_filename: str) -> str:
-    """Filesystem-safe tag identifying which model produced a stem file,
-    so cached output from one model is never mistaken for another's."""
-    return _MODEL_TAG_RE.sub("_", model_filename).strip("_")
+    """Filesystem-safe tag identifying which model AND which
+    overlap/shift quality settings produced a stem file, so cached
+    output from a different model OR different settings is never
+    mistaken for the current configuration's output."""
+    base = _MODEL_TAG_RE.sub("_", model_filename).strip("_")
+    return f"{base}__{_quality_tag()}"
 
 
 _STEM_LABEL_RE = re.compile(r"\(([^)]+)\)")
@@ -181,6 +202,17 @@ class SeparatorClient:
                         "--output_dir", out_dir,
                         "--output_format", "wav",
                         "--model_filename", model_filename,
+                        # Quality-over-speed overlap/shifts - see
+                        # Separator.MDXC_OVERLAP etc. for why these exist
+                        # and why segment_size is deliberately not among
+                        # them. Harmless to pass all three architectures'
+                        # flags regardless of which one this model
+                        # actually is - audio-separator only applies the
+                        # group matching the loaded model's architecture.
+                        "--mdxc_overlap", str(Separator.MDXC_OVERLAP),
+                        "--mdx_overlap", str(Separator.MDX_OVERLAP),
+                        "--demucs_overlap", str(Separator.DEMUCS_OVERLAP),
+                        "--demucs_shifts", str(Separator.DEMUCS_SHIFTS),
                     ],
                     capture_output=True, text=True, timeout=Timeouts.SEPARATION, check=False,
                     **no_window_popen_kwargs(),
@@ -252,6 +284,17 @@ class SeparatorClient:
                         "--output_dir", out_dir,
                         "--output_format", "wav",
                         "--model_filename", model_filename,
+                        # Quality-over-speed overlap/shifts - see
+                        # Separator.MDXC_OVERLAP etc. for why these exist
+                        # and why segment_size is deliberately not among
+                        # them. Harmless to pass all three architectures'
+                        # flags regardless of which one this model
+                        # actually is - audio-separator only applies the
+                        # group matching the loaded model's architecture.
+                        "--mdxc_overlap", str(Separator.MDXC_OVERLAP),
+                        "--mdx_overlap", str(Separator.MDX_OVERLAP),
+                        "--demucs_overlap", str(Separator.DEMUCS_OVERLAP),
+                        "--demucs_shifts", str(Separator.DEMUCS_SHIFTS),
                     ],
                     capture_output=True, text=True, timeout=Timeouts.SEPARATION, check=False,
                     **no_window_popen_kwargs(),

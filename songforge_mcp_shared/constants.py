@@ -120,6 +120,33 @@ class Separator:
     # case the architecture change above turns out worse in practice.
     ALT_MODEL = "model_bs_roformer_ep_368_sdr_12.9628.ckpt"
 
+    # Real, confirmed cause of "artifacty, vocoder-like when isolated"
+    # stems: separator_client.py was calling audio-separator with only
+    # --output_dir/--output_format/--model_filename, leaving every
+    # quality-affecting parameter at the CLI's own fast-mode defaults -
+    # never deliberately chosen for this project. Checked
+    # `audio-separator --help` directly rather than assuming: its own
+    # docs describe every one of these as "higher/larger = better but
+    # slower/more resources" - low overlap in particular is a textbook
+    # cause of audible seams at chunk boundaries in this kind of
+    # windowed inference, which matches the reported symptom closely.
+    # Doubled from the tool's defaults as a first real quality pass, not
+    # maxed out - full max values (e.g. mdxc_overlap=50) are drastically
+    # slower for further gains that haven't been confirmed necessary yet.
+    # All independently env-overridable, same pattern as DEFAULT_MODEL.
+    #
+    # segment_size intentionally left untouched here, unlike
+    # overlap/shifts: this project's installer auto-detects GPU VRAM to
+    # pick a small-enough ACE-Step checkpoint for the user's hardware
+    # (see GradioServer.CHECKPOINT) - raising segment_size raises peak
+    # VRAM usage during separation and could reintroduce an OOM on the
+    # same low-VRAM cards that auto-detection exists to support, whereas
+    # more overlap/shifts costs time, not memory.
+    MDXC_OVERLAP = int(os.environ.get("SONGFORGE_SEPARATOR_MDXC_OVERLAP", "16"))  # tool default: 8, range 2-50
+    MDX_OVERLAP = float(os.environ.get("SONGFORGE_SEPARATOR_MDX_OVERLAP", "0.5"))  # tool default: 0.25, range 0.001-0.999
+    DEMUCS_OVERLAP = float(os.environ.get("SONGFORGE_SEPARATOR_DEMUCS_OVERLAP", "0.5"))  # tool default: 0.25, range 0.001-0.999
+    DEMUCS_SHIFTS = int(os.environ.get("SONGFORGE_SEPARATOR_DEMUCS_SHIFTS", "4"))  # tool default: 2, higher = smoother via prediction-averaging
+
 
 class GradioServer:
     HOST = "127.0.0.1"
@@ -187,6 +214,50 @@ class Timeouts:
     # soundfile/libsndfile can't write directly - a few minutes of audio
     # transcodes in well under this on any real hardware.
     FFMPEG_CONVERT = 120.0
+    # Per-chunk, not per-file - omnizart_client.py runs one subprocess call
+    # per audio chunk (see OmnizartTranscription.CHUNK_SECONDS), so this
+    # only needs to cover a single short clip's model-load + inference
+    # time, not a whole song. Generous headroom over the ~5-10s observed
+    # for a 30s clip on the hardware this was built against.
+    OMNIZART_CHUNK = 180.0
+
+
+class OmnizartTranscription:
+    # Real, confirmed bug this works around: Omnizart's note-detection
+    # density collapses over the course of a long audio file (measured
+    # directly: 5.4 notes/sec in the first 30s of a 187s song, 0.03
+    # notes/sec in the last 30s of the SAME file) - re-running the same
+    # audio as a short standalone clip recovered real notes that were
+    # missing when it was embedded deep in a long file. 30s was not
+    # exhaustively tuned against many songs - it's the size the recovery
+    # was actually confirmed at. Override via SONGFORGE_OMNIZART_CHUNK_SECONDS
+    # if a different value proves better for other material.
+    CHUNK_SECONDS = float(os.environ.get("SONGFORGE_OMNIZART_CHUNK_SECONDS", "30"))
+    # Omnizart's own supported transcription-mode names (--model-path).
+    # "Piano" for piano-specific audio (own dedicated checkpoint, generally
+    # sharper than "Pop" for that one instrument specifically); "Pop" for
+    # general/mixed pop instrumentation; "Stream" for its note-stream
+    # variant. Default matches this project's first real, confirmed use
+    # case (a piano stem) - not a claim it's the best choice for every
+    # instrument.
+    DEFAULT_MODEL_MODE = os.environ.get("SONGFORGE_OMNIZART_MODEL_MODE", "Piano")
+    # Folder name of the tuned-OnsetTh Piano checkpoint scripts/install_omnizart.py
+    # creates (that script keeps its own copy of this exact string, by
+    # design - it's deliberately dependency-free from this package, see
+    # its own module docstring - the two must be kept in sync by hand).
+    # omnizart_client.py resolves "Piano" mode to this checkpoint's full
+    # path when it exists, falling back to the bare "Piano" mode name
+    # (Omnizart's own stock checkpoint) otherwise - e.g. an
+    # already-installed Omnizart env from before this tuning existed.
+    # Real, measured reason this exists at all: a systematic sweep on real
+    # material scored candidate OnsetTh values against independent onset
+    # detection on the raw audio. Omnizart's own stock default (4)
+    # recalled 76% of real onsets; 2.5 (what this checkpoint uses)
+    # recalled 80% for a contained increase in likely-spurious extra
+    # notes; pushing further to 1.5 only gained 2 more recall points for a
+    # much steeper false-positive cost - diminishing returns past 2.5, not
+    # a value worth chasing lower by default.
+    TUNED_PIANO_CHECKPOINT_NAME = "music_piano_tuned"
 
 
 MAX_CAPTION_LENGTH = 1000     # characters

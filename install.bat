@@ -110,6 +110,26 @@ echo Separator class for why these two specifically...
 REM ---- Step 6: yt-dlp (already a dependency of this server's own venv) ----
 setx SONGFORGE_YTDLP_PYTHON "%~dp0.venv\Scripts\python.exe"
 
+REM ---- Step 6b: Omnizart - optional alternative multi-instrument
+REM transcription engine. Own isolated venv (heavy TF + madmom deps,
+REM plus checkpoint downloads), same per-tool venv convention as the
+REM separator step above. Interactive, unlike the separator step: this
+REM is a genuinely optional alternative, not required for core
+REM generation, and its install is heavier (large checkpoints, several
+REM compatibility patches applied automatically - see
+REM scripts/install_omnizart.py for why).
+echo.
+set /p INSTALL_OMNIZART="Install Omnizart (optional alternative multi-instrument MIDI transcription)? (y/n): "
+if /i "!INSTALL_OMNIZART!"=="y" (
+    ".venv\Scripts\python.exe" "%~dp0scripts\install_omnizart.py"
+    if not errorlevel 1 (
+        setx SONGFORGE_OMNIZART_PYTHON "%~dp0.omnizart_env\Scripts\python.exe"
+        set "SONGFORGE_OMNIZART_PYTHON=%~dp0.omnizart_env\Scripts\python.exe"
+    ) else (
+        echo Omnizart install failed - skipping. Basic-pitch transcription still works.
+    )
+)
+
 REM ---- Step 7: Configure Claude Desktop ----
 echo.
 echo Configuring Claude Desktop...
@@ -186,6 +206,9 @@ echo Done.
 echo   SONGFORGE_ACESTEP_HOME     = %ACESTEP_DEST%
 echo   SONGFORGE_SEPARATOR_PYTHON = %SEPARATOR_HOME%\Scripts\python.exe
 echo   SONGFORGE_YTDLP_PYTHON     = %~dp0.venv\Scripts\python.exe
+if not "%SONGFORGE_OMNIZART_PYTHON%"=="" (
+    echo   SONGFORGE_OMNIZART_PYTHON = %SONGFORGE_OMNIZART_PYTHON%
+)
 if not "%SONGFORGE_ACESTEP_CHECKPOINT%"=="" (
     echo   SONGFORGE_ACESTEP_CHECKPOINT = %SONGFORGE_ACESTEP_CHECKPOINT%
 )
