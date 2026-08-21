@@ -25,6 +25,7 @@ dependencies = [
     "numpy>=1.26.4",
     "basic-pitch>=0.4.0",
     "psutil>=7.0.0",
+    "colorama>=0.4.6",
 ]
 keywords = ["mcp", "model-context-protocol", "claude", "ace-step", "music-generation", "ai-music"]
 classifiers = [
@@ -50,7 +51,17 @@ dev = [
     "pytest-asyncio>=0.21",
 ]
 
-[project.scripts]
+[project.gui-scripts]
+# gui-scripts, not scripts: this is a background MCP server launched by
+# Claude Desktop over stdio (pipes), never interacted with in a terminal
+# directly - a console-subsystem exe would pop a visible, empty console
+# window on every launch regardless of what's printed to it (Windows
+# allocates one for any console-subsystem process unless the OS is told
+# not to), which is unwanted/invasive UX for a background server. A
+# gui-scripts entry builds a GUI-subsystem launcher instead, so Windows
+# never allocates a console at all - stdin/stdout/stderr still work
+# perfectly fine as redirected pipes, which is exactly how Claude Desktop
+# (or any MCP host) already talks to this process.
 songforge-mcp = "songforge_mcp.main:main"
 
 [tool.hatch.build.targets.wheel]

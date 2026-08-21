@@ -4,7 +4,11 @@ import os
 import pretty_midi
 import soundfile as sf
 
-from songforge_mcp_shared.constants import MAX_CAPTION_LENGTH, MAX_LYRICS_LENGTH, Paths
+from songforge_mcp_shared.constants import (
+    MAX_CAPTION_LENGTH,
+    MAX_LYRICS_LENGTH,
+    Paths,
+)
 from songforge_mcp_shared.error_codes import ErrorCode, SongForgeMCPError
 
 _ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}
@@ -189,3 +193,5 @@ def measure_wav_duration_seconds(wav_path: str) -> float:
         raise SongForgeMCPError(
             ErrorCode.SYNTHESIS_FAILED, f"could not read rendered audio at {wav_path}: {e}"
         ) from e
+
+

@@ -27,6 +27,7 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import threading
 
 import numpy as np
 import pretty_midi
@@ -49,6 +50,13 @@ from songforge_mcp_shared.constants import (
 from songforge_mcp_shared.error_codes import ErrorCode, SongForgeMCPError
 
 _OMNIZART_EXE_NAME = "omnizart.exe" if platform.system() == "Windows" else "omnizart"
+
+# Omnizart loads TensorFlow models onto the same GPU ACE-Step/the separator
+# run on - a plain threading.Lock (not asyncio.Lock, since this module is
+# driven via asyncio.to_thread rather than natively async) keeps concurrent
+# transcription calls from competing for GPU memory, matching
+# SeparatorClient._lock's identical reasoning.
+_lock = threading.Lock()
 
 # Krumhansl-Schmuckler major/minor diatonic scale degrees, as semitone
 # offsets from the root - used to flag notes outside the song's own
@@ -93,7 +101,21 @@ def _resolve_model_path(python_exe: str, model_mode: str) -> str:
     venv_root = os.path.dirname(os.path.dirname(python_exe))
     lib_dir = "Lib" if platform.system() == "Windows" else "lib"
     for root, dirs, _files in os.walk(os.path.join(venv_root, lib_dir)):
-        if os.path.basename(root) == "checkpoints" and "music" in dirs:
+        # Requiring the stock "music_piano" checkpoint to also be present
+        # (not just any "checkpoints/music" directory) is a much more
+        # specific signal that this is actually Omnizart's own checkpoint
+        # tree, not an unrelated package that happens to share that
+        # directory naming - os.walk's traversal order isn't guaranteed,
+        # so a loose match could otherwise silently resolve to the wrong
+        # directory and fall back to the untuned checkpoint with no
+        # warning. Keep walking (don't break) past a "checkpoints/music"
+        # that fails this check, in case it was a false positive and
+        # Omnizart's real one is elsewhere in the tree.
+        if (
+            os.path.basename(root) == "checkpoints"
+            and "music" in dirs
+            and os.path.isdir(os.path.join(root, "music", "music_piano"))
+        ):
             candidate = os.path.join(
                 root, "music", OmnizartTranscription.TUNED_PIANO_CHECKPOINT_NAME
             )
@@ -101,6 +123,17 @@ def _resolve_model_path(python_exe: str, model_mode: str) -> str:
                 return candidate
             break
     return model_mode
+
+
+def _group_by_pitch(notes: list) -> dict:
+    """Groups notes by MIDI pitch - the same grouping _merge_close_notes
+    uses internally, exposed here so _close_gaps (which assumes a single
+    pitch/line - see its docstring) can be applied per-pitch instead of
+    across a flat, polyphonic note list."""
+    by_pitch: dict[int, list] = {}
+    for note in notes:
+        by_pitch.setdefault(note.pitch, []).append(note)
+    return by_pitch
 
 
 def _chunk_audio(audio_path: str, chunk_seconds: float, out_dir: str) -> list[dict]:
@@ -247,18 +280,34 @@ def transcribe_with_omnizart(
     try:
         chunks = _chunk_audio(audio_path, chunk_seconds, work_dir)
 
-        all_notes = []
+        # Keyed by instrument index rather than flattened into one list -
+        # non-Piano modes (Pop/Stream) can produce multiple pretty_midi
+        # instruments per chunk (e.g. separate bass/melody parts), and
+        # Omnizart emits them in a consistent order per chunk, so index
+        # is a reasonable cross-chunk identity. Keeping them separate
+        # stops _merge_close_notes/_close_gaps below from gluing an
+        # unrelated instrument's note onto this one just because they
+        # share a pitch and are close in time.
+        notes_by_instrument: dict[int, list] = {}
         for chunk in chunks:
             chunk_midi_path = os.path.splitext(chunk["path"])[0] + ".mid"
-            result = subprocess.run(
-                [
-                    omnizart_exe, "music", "transcribe", chunk["path"],
-                    "--model-path", resolved_model_path,
-                    "--output", chunk_midi_path,
-                ],
-                capture_output=True, text=True, timeout=Timeouts.OMNIZART_CHUNK, check=False,
-                **no_window_popen_kwargs(),
-            )
+            with _lock:
+                try:
+                    result = subprocess.run(
+                        [
+                            omnizart_exe, "music", "transcribe", chunk["path"],
+                            "--model-path", resolved_model_path,
+                            "--output", chunk_midi_path,
+                        ],
+                        capture_output=True, text=True, timeout=Timeouts.OMNIZART_CHUNK, check=False,
+                        **no_window_popen_kwargs(),
+                    )
+                except subprocess.TimeoutExpired as e:
+                    raise SongForgeMCPError(
+                        ErrorCode.SUBPROCESS_TIMEOUT,
+                        f"omnizart exceeded {Timeouts.OMNIZART_CHUNK}s on chunk starting "
+                        f"at {chunk['start']:.1f}s",
+                    ) from e
             if result.returncode != 0:
                 raise SongForgeMCPError(
                     ErrorCode.OMNIZART_TRANSCRIPTION_FAILED,
@@ -273,16 +322,37 @@ def transcribe_with_omnizart(
                 )
 
             chunk_pm = pretty_midi.PrettyMIDI(chunk_midi_path)
-            for inst in chunk_pm.instruments:
+            for inst_idx, inst in enumerate(chunk_pm.instruments):
                 for note in inst.notes:
                     note.start += chunk["start"]
                     note.end += chunk["start"]
-                    all_notes.append(note)
+                    notes_by_instrument.setdefault(inst_idx, []).append(note)
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
-    merged_notes = _merge_close_notes(all_notes, max_gap_seconds=merge_gap_seconds)
-    merged_notes = _close_gaps(merged_notes, max_gap_seconds=legato_gap_seconds)
+    # Merge/close-gap independently per instrument, then flatten to the
+    # single output track this tool has always produced (matching
+    # basic-pitch's own flat-track output - see midi_transcription.py's
+    # module docstring) - the per-instrument separation above only exists
+    # to keep the two cleanup passes from crossing instrument boundaries.
+    merged_notes = []
+    for inst_notes in notes_by_instrument.values():
+        inst_merged = _merge_close_notes(inst_notes, max_gap_seconds=merge_gap_seconds)
+        # _close_gaps assumes a single pitch/line (see its docstring) -
+        # Piano (the default model_mode) is inherently polyphonic, so
+        # applying it across all pitches at once would extend a note's
+        # end into an unrelated note's onset just because they're
+        # chronologically adjacent, regardless of pitch. Grouping by
+        # pitch first (same grouping _merge_close_notes already uses
+        # internally) keeps each call within a single line, closing only
+        # genuine same-pitch transcription gaps.
+        inst_merged = [
+            closed
+            for pitch_notes in _group_by_pitch(inst_merged).values()
+            for closed in _close_gaps(pitch_notes, max_gap_seconds=legato_gap_seconds)
+        ]
+        merged_notes.extend(inst_merged)
+    merged_notes.sort(key=lambda n: n.start)
 
     root, mode, _confidence = _detect_key_from_notes(merged_notes)
     off_scale = _find_off_scale_notes(merged_notes, root, mode)

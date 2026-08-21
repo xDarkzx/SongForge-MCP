@@ -76,11 +76,21 @@ class _FakeLocator:
     async def is_checked(self):
         return self._checked
 
+    def locator(self, selector):
+        # The real chain (text=X -> ancestor block -> inner control)
+        # traverses real DOM; the fake just resolves straight through to
+        # whatever terminal field the test registered under that text.
+        return self
+
+    async def wait_for(self, state=None, timeout=None):
+        pass
+
 
 class _FakePage:
     """Minimal stand-in for a Playwright Page - looks up a locator by
-    whatever key (label text or placeholder text) it's asked for from a
-    single dict, matching how the real page resolves either."""
+    whatever key (label text, placeholder text, or block text) it's
+    asked for from a single dict, matching how the real page resolves
+    any of them."""
 
     def __init__(self, fields: dict):
         self._fields = fields
@@ -90,6 +100,9 @@ class _FakePage:
 
     def get_by_placeholder(self, placeholder, exact=True):
         return self._fields.get(placeholder, _FakeLocator(count=0))
+
+    def get_by_text(self, text, exact=True):
+        return self._fields.get(text, _FakeLocator(count=0))
 
     def get_by_role(self, role, name=None, exact=False):
         return _FakeLocator(count=1, visible=True)
@@ -167,6 +180,26 @@ def test_set_field_by_label_raises_when_radio_option_not_found():
     with pytest.raises(SongForgeMCPError) as exc_info:
         asyncio.run(ACEStepClient._set_field_by_label(page, "Inference Method", "SDE"))
     assert exc_info.value.code == ErrorCode.INVALID_PARAMETER
+
+
+def test_set_field_by_label_seed_uses_block_text_fallback_and_unchecks_random_seed():
+    # Regression test for a real confirmed incident: get_by_label("Seed",
+    # exact=True) matches nothing at all against a live ACE-Step server -
+    # not a wording change like "Key", a broken aria association with no
+    # placeholder to fall back on either. Must resolve via the field's
+    # own containing block's text instead, and "Random Seed" (checked by
+    # default in the live UI) must get unchecked or the fill has no real
+    # effect - this is what generate_vocal_track_takes relies on for
+    # per-take seed variation.
+    seed_field = _FakeLocator(count=1, visible=True, value="")
+    random_seed_checkbox = _FakeLocator(count=1, visible=True, checked=True)
+    page = _FakePage({
+        "Seed": seed_field,  # resolved via get_by_text, not get_by_label
+        "Random Seed": random_seed_checkbox,
+    })
+    asyncio.run(ACEStepClient._set_field_by_label(page, "Seed", "123456"))
+    assert asyncio.run(seed_field.input_value()) == "123456"
+    assert asyncio.run(random_seed_checkbox.is_checked()) is False
 
 
 def test_set_field_by_label_raises_when_label_not_found_at_all():
@@ -315,3 +348,31 @@ def test_acquire_launch_lock_reclaims_stale_lock(tmp_path, monkeypatch):
     # imported Timeouts by reference from the same module object, so the
     # patched class attribute is visible through that reference too.
     assert ACEStepClient._acquire_launch_lock(lock_path) is True
+
+
+def test_log_last_activity_returns_zero_when_no_logs_exist(tmp_path):
+    missing = str(tmp_path / "does_not_exist.txt")
+    assert ACEStepClient._log_last_activity(missing) == 0.0
+
+
+def test_log_last_activity_returns_newest_mtime_across_files(tmp_path):
+    older = tmp_path / "stdout.txt"
+    newer = tmp_path / "stderr.txt"
+    older.write_text("x")
+    newer.write_text("y")
+    old_time = time.time() - 500
+    os.utime(str(older), (old_time, old_time))
+
+    result = ACEStepClient._log_last_activity(str(older), str(newer))
+
+    assert result == pytest.approx(os.path.getmtime(str(newer)), abs=0.01)
+
+
+def test_log_last_activity_ignores_missing_files_mixed_with_real_ones(tmp_path):
+    real = tmp_path / "stderr.txt"
+    real.write_text("data")
+    missing = str(tmp_path / "stdout.txt")
+
+    result = ACEStepClient._log_last_activity(missing, str(real))
+
+    assert result == pytest.approx(os.path.getmtime(str(real)), abs=0.01)

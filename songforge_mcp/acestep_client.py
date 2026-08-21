@@ -105,6 +105,49 @@ def _venv_python_path(acestep_home: str) -> str:
         return os.path.join(acestep_home, ".venv", "Scripts", "python.exe")
     return os.path.join(acestep_home, ".venv", "bin", "python")
 
+
+def _find_pid_on_port(port: int) -> int | None:
+    """Returns the PID of the process with a LISTEN socket on `port`, or
+    None if nothing is listening there - used by extract_track's
+    automatic checkpoint swap to find the real ACE-Step server process
+    to stop. Confirmed live that this project's ACE-Step launch can show
+    two python.exe processes with the identical command line (a parent
+    that re-execs itself, observed on Windows) - only one of them ever
+    actually holds the LISTEN socket, and stopping that one was
+    confirmed to cleanly take the other down with it, so this
+    deliberately doesn't try to also hunt down a parent/child pair."""
+    try:
+        for conn in psutil.net_connections(kind="inet"):
+            if (
+                conn.status == psutil.CONN_LISTEN
+                and conn.laddr
+                and conn.laddr.port == port
+                and conn.pid
+            ):
+                return conn.pid
+    except (psutil.AccessDenied, OSError):
+        return None
+    return None
+
+
+def _stop_server_process(port: int, timeout: float = 30.0) -> None:
+    """Gracefully stops whatever's listening on `port` (terminate, then
+    kill only if it doesn't exit in time) - a no-op if nothing's
+    there."""
+    pid = _find_pid_on_port(port)
+    if pid is None:
+        return
+    try:
+        proc = psutil.Process(pid)
+        proc.terminate()
+        try:
+            proc.wait(timeout=timeout)
+        except psutil.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+    except psutil.NoSuchProcess:
+        pass
+
 ProgressCallback = Callable[[float, str], Awaitable[None]]
 
 _PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
@@ -161,6 +204,23 @@ class ACEStepClient:
                 return True
         except OSError:
             return False
+
+    @staticmethod
+    def _log_last_activity(*log_paths: str) -> float:
+        """Latest mtime across the given log files, or 0.0 if none exist
+        yet. Used as a liveness signal for a launched-but-not-yet-up
+        ACE-Step process: as long as it keeps writing to its own stdout/
+        stderr log, it's actively doing something (loading checkpoint
+        shards, initializing the LM, etc.), not hung - see
+        Timeouts.SERVER_STARTUP_STALL_SECONDS for why this replaced a flat
+        wall-clock cutoff."""
+        mtimes = []
+        for path in log_paths:
+            try:
+                mtimes.append(os.path.getmtime(path))
+            except OSError:
+                pass
+        return max(mtimes) if mtimes else 0.0
 
     @staticmethod
     def _try_acquire_lock_file(lock_path: str, stale_after_seconds: float) -> bool:
@@ -265,6 +325,13 @@ class ACEStepClient:
         lock_path = os.path.join(Paths.OUTPUT_ROOT, ".acestep_launch.lock")
         launched_by_us = False
 
+        # Stall tracking, not just a flat wall-clock cutoff (real, confirmed
+        # incident 2026-08-21 - see Timeouts.SERVER_STARTUP_STALL_SECONDS):
+        # last_activity tracks the newest mtime seen across ACE-Step's own
+        # stdout/stderr logs, starting from "now" so a launch that hasn't
+        # written anything yet isn't immediately treated as stalled.
+        last_activity = time.time()
+        stalled = False
         try:
             deadline = time.time() + Timeouts.SERVER_STARTUP
             while time.time() < deadline:
@@ -272,6 +339,14 @@ class ACEStepClient:
                     if on_progress:
                         await on_progress(0.0, "ACE-Step server is up — starting generation")
                     return
+
+                current_activity = await asyncio.to_thread(self._log_last_activity, stdout_log, stderr_log)
+                if current_activity > last_activity:
+                    last_activity = current_activity
+                stalled_for = time.time() - last_activity
+                if stalled_for > Timeouts.SERVER_STARTUP_STALL_SECONDS:
+                    stalled = True
+                    break
 
                 if not launched_by_us:
                     launched_by_us = await asyncio.to_thread(self._acquire_launch_lock, lock_path)
@@ -299,13 +374,27 @@ class ACEStepClient:
                         # flags, rather than shelling out to PowerShell's
                         # Start-Process, avoid both a Windows-only dependency and an
                         # f-string-built shell command line.
+                        # Real, confirmed bug (2026-08-20): DETACHED_PROCESS/
+                        # CREATE_NO_WINDOW alone don't reliably suppress a
+                        # window on Windows 11 when Windows Terminal is the
+                        # default terminal host - it opens a visible window
+                        # for the new console session anyway, regardless of
+                        # CREATE_NO_WINDOW. A STARTUPINFO with
+                        # STARTF_USESHOWWINDOW/SW_HIDE is the more reliable
+                        # suppression path across that terminal-host difference.
+                        startupinfo = None
+                        if _IS_WINDOWS:
+                            startupinfo = subprocess.STARTUPINFO()
+                            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                            startupinfo.wShowWindow = subprocess.SW_HIDE
                         detach_kwargs: dict = (
                             {
                                 "creationflags": (
                                     subprocess.DETACHED_PROCESS
                                     | subprocess.CREATE_NEW_PROCESS_GROUP
                                     | subprocess.CREATE_NO_WINDOW
-                                )
+                                ),
+                                "startupinfo": startupinfo,
                             }
                             if _IS_WINDOWS
                             else {"start_new_session": True}
@@ -345,8 +434,12 @@ class ACEStepClient:
                             )
 
                 if on_progress:
-                    remaining = int(deadline - time.time())
-                    await on_progress(0.0, f"Waiting for ACE-Step server to finish loading (~{remaining}s left before timeout)")
+                    idle_for = int(time.time() - last_activity)
+                    await on_progress(
+                        0.0,
+                        f"Waiting for ACE-Step server to finish loading (log quiet for {idle_for}s; "
+                        f"still progressing as long as that keeps resetting)",
+                    )
                 await asyncio.sleep(3)
         finally:
             if launched_by_us:
@@ -355,10 +448,17 @@ class ACEStepClient:
                 except OSError:
                     pass
 
+        if stalled:
+            raise SongForgeMCPError(
+                ErrorCode.SUBPROCESS_TIMEOUT,
+                f"ACE-Step server's log has been silent for over {Timeouts.SERVER_STARTUP_STALL_SECONDS:.0f}s "
+                f"with no port ever opening - looks genuinely stuck, not just slow. Check {stderr_log}.",
+            )
         raise SongForgeMCPError(
             ErrorCode.SUBPROCESS_TIMEOUT,
-            f"ACE-Step server did not start within {Timeouts.SERVER_STARTUP}s "
-            f"(checkpoint loading can be slow on first run). Check {stderr_log}.",
+            f"ACE-Step server did not start within {Timeouts.SERVER_STARTUP:.0f}s even though its log "
+            f"kept showing activity - unusually slow hardware, or something looping without finishing. "
+            f"Check {stderr_log}.",
         )
 
     # Several Optional Parameters fields are paired with an "X Auto"
@@ -375,6 +475,7 @@ class ACEStepClient:
         "TimeSig": "TimeSig Auto",
         "Vocal Language": "Language Auto",
         "Audio Duration (seconds)": "Duration Auto",
+        "Seed": "Random Seed",
     }
 
     # "Key" specifically has no working accessible name at all - its real
@@ -387,6 +488,28 @@ class ACEStepClient:
         "Key": "e.g. C Major, A Minor, F# Minor",
     }
 
+    # "Seed" is a different flavor of the same underlying problem: its own
+    # label text (confirmed live to be exactly "Seed", no tooltip
+    # concatenation) simply isn't aria-associated with its <textarea> at
+    # all - get_by_label("Seed", exact=True) matches nothing regardless of
+    # which accordion is open. It also has no placeholder to fall back on
+    # (confirmed empty). Locating via the label's own containing "block"
+    # element instead - the same "text=X -> ancestor block -> inner
+    # control" pattern _switch_to_remix_mode already uses for Remix's
+    # Source Audio / Remix Strength fields - reliably finds it (confirmed
+    # live: fill + read-back round-tripped correctly).
+    _BLOCK_TEXT_FALLBACK_FOR_LABEL = {
+        "Seed": "Seed",
+    }
+
+    # Unlike BPM/Key/TimeSig/Vocal Language/Audio Duration (all behind the
+    # "Optional Parameters" accordion on the main form), Seed lives behind
+    # "Settings" -> the DiT advanced-controls accordion - confirmed by
+    # reading ACE-Step's own generation_advanced_dit_controls.py. Needs its
+    # own accordion-open step; the "Optional Parameters" fallback below
+    # doesn't reach it.
+    _SETTINGS_ACCORDION_LABELS = frozenset({"Seed"})
+
     @staticmethod
     async def _set_field_by_label(page, label: str, value) -> None:
         """Generic escape hatch for ACE-Step's ~70 advanced settings
@@ -395,11 +518,28 @@ class ACEStepClient:
         caller explicitly names; every other field is left exactly at
         the UI's own default (the lesson from three failed attempts at
         reconstructing all 72 raw-API defaults by hand)."""
+        block_text = ACEStepClient._BLOCK_TEXT_FALLBACK_FOR_LABEL.get(label)
         placeholder = ACEStepClient._PLACEHOLDER_FALLBACK_FOR_LABEL.get(label)
-        if placeholder:
+        if block_text:
+            field = page.get_by_text(block_text, exact=True).locator(
+                "xpath=ancestor::*[contains(@class,'block')][1]"
+            ).locator("textarea, input").first
+        elif placeholder:
             field = page.get_by_placeholder(placeholder, exact=True).first
         else:
             field = page.get_by_label(label, exact=True).first
+
+        if label in ACEStepClient._SETTINGS_ACCORDION_LABELS:
+            # Use the established open-if-not-already-open helper, not a
+            # blind click - Settings' header is a toggle, and _load_lora
+            # already hit the bug where an unconditional click closed it
+            # instead of opening it because something earlier had left it
+            # open already.
+            try:
+                await ACEStepClient._ensure_accordion_open(page, "Settings", field)
+            except Exception:
+                pass
+
         try:
             count = await field.count()
             visible = bool(count) and await field.is_visible()
@@ -948,4 +1088,427 @@ class ACEStepClient:
             "audio_path": final_path,
             "generation_seconds": round(time.time() - start_time, 1),
             "reference_audio_confirmed": reference_audio_confirmed,
+        }
+
+    _BASE_CHECKPOINT = "acestep-v15-xl-base"
+
+    async def _launch_server_with_checkpoint(self, checkpoint: str) -> None:
+        """Launches ACE-Step's Gradio server detached, with an explicit
+        checkpoint override. Deliberately separate from
+        ensure_server_running's own launch code (real duplication, not
+        a shared refactor) so a bug in the Extract-mode checkpoint-swap
+        path below can never regress the main, far-more-heavily-used
+        generate() launch path."""
+        venv_python = _venv_python_path(self.acestep_home)
+        pipeline_script = os.path.join(self.acestep_home, "acestep", "acestep_v15_pipeline.py")
+        if not os.path.isfile(venv_python) or not os.path.isfile(pipeline_script):
+            raise SongForgeMCPError(
+                ErrorCode.ACESTEP_NOT_CONFIGURED,
+                f"Expected ACE-Step venv/entrypoint not found under {self.acestep_home}. "
+                "Re-run install (see docs/INSTALLATION.md).",
+            )
+        stdout_log = os.path.join(self.acestep_home, "mcp_server_stdout.txt")
+        stderr_log = os.path.join(self.acestep_home, "mcp_server_stderr.txt")
+        args = [
+            venv_python, pipeline_script,
+            "--port", str(GradioServer.PORT),
+            "--server-name", GradioServer.HOST,
+            "--language", "en",
+            "--config_path", checkpoint,
+            "--lm_model_path", "acestep-5Hz-lm-0.6B",
+            "--init_service", "true",
+        ]
+        # See the matching comment in ensure_server_running: STARTUPINFO/
+        # SW_HIDE is needed alongside CREATE_NO_WINDOW to reliably suppress
+        # a window on Windows 11 when Windows Terminal is the default
+        # terminal host.
+        startupinfo = None
+        if _IS_WINDOWS:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+        detach_kwargs: dict = (
+            {
+                "creationflags": (
+                    subprocess.DETACHED_PROCESS
+                    | subprocess.CREATE_NEW_PROCESS_GROUP
+                    | subprocess.CREATE_NO_WINDOW
+                ),
+                "startupinfo": startupinfo,
+            }
+            if _IS_WINDOWS
+            else {"start_new_session": True}
+        )
+        launch_env = os.environ.copy()
+        launch_env["ACESTEP_GENERATION_TIMEOUT"] = str(int(Timeouts.GENERATION))
+        try:
+            with open(stdout_log, "wb") as out_f, open(stderr_log, "wb") as err_f:
+                await asyncio.to_thread(
+                    subprocess.Popen,
+                    args,
+                    cwd=self.acestep_home,
+                    stdout=out_f,
+                    stderr=err_f,
+                    stdin=subprocess.DEVNULL,
+                    env=launch_env,
+                    **detach_kwargs,
+                )
+        except OSError as e:
+            raise SongForgeMCPError(
+                ErrorCode.SUBPROCESS_FAILED, f"failed to launch ACE-Step server: {e}"
+            ) from e
+
+    async def _server_supports_extract(self) -> bool:
+        """Opens a throwaway page against whatever's currently running on
+        GradioServer.URL and checks whether Extract mode is offered - the
+        cheapest reliable signal for "is the Base checkpoint the one
+        actually loaded" (confirmed from ACE-Step's own source:
+        Extract/Lego/Complete only appear when it detects a pure-Base
+        model - see is_pure_base_model in its model_config.py)."""
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            try:
+                page = await browser.new_page()
+                try:
+                    await page.goto(GradioServer.URL, timeout=15000)
+                except Exception:
+                    return False
+                await page.wait_for_timeout(3000)
+                return await page.get_by_label("Extract", exact=True).first.count() > 0
+            finally:
+                await browser.close()
+
+    async def _wait_for_server_and_extract_mode(self, on_progress: ProgressCallback | None) -> None:
+        """Polls until the server is up AND actually offers Extract mode -
+        not just "up", since a launch with an unexpectedly wrong
+        checkpoint string would otherwise be silently accepted as
+        success. Uses Timeouts.CHECKPOINT_SWAP_STARTUP, not the shorter
+        SERVER_STARTUP - see that constant's own comment for the real,
+        confirmed incident (a swap timing out on this project's own
+        marginal-VRAM hardware) behind the wider ceiling. Same stall-based
+        give-up logic as ensure_server_running - see
+        Timeouts.SERVER_STARTUP_STALL_SECONDS."""
+        stdout_log = os.path.join(self.acestep_home, "mcp_server_stdout.txt")
+        stderr_log = os.path.join(self.acestep_home, "mcp_server_stderr.txt")
+        last_activity = time.time()
+        deadline = time.time() + Timeouts.CHECKPOINT_SWAP_STARTUP
+        while time.time() < deadline:
+            if await asyncio.to_thread(self._is_server_up) and await self._server_supports_extract():
+                return
+
+            current_activity = await asyncio.to_thread(self._log_last_activity, stdout_log, stderr_log)
+            if current_activity > last_activity:
+                last_activity = current_activity
+            stalled_for = time.time() - last_activity
+            if stalled_for > Timeouts.SERVER_STARTUP_STALL_SECONDS:
+                raise SongForgeMCPError(
+                    ErrorCode.SUBPROCESS_TIMEOUT,
+                    f"ACE-Step's log has been silent for over {Timeouts.SERVER_STARTUP_STALL_SECONDS:.0f}s "
+                    f"while switching to the Base checkpoint, with no port ever opening - looks genuinely "
+                    f"stuck, not just slow. Check {stderr_log}.",
+                )
+
+            if on_progress:
+                idle_for = int(time.time() - last_activity)
+                await on_progress(
+                    0.1, f"Waiting for ACE-Step (Base checkpoint) to finish loading (log quiet for {idle_for}s)"
+                )
+            await asyncio.sleep(3)
+        raise SongForgeMCPError(
+            ErrorCode.SUBPROCESS_TIMEOUT,
+            f"ACE-Step did not come up on the Base checkpoint within {Timeouts.CHECKPOINT_SWAP_STARTUP:.0f}s "
+            "even though its log kept showing activity - unusually slow hardware. It may still be loading "
+            "in the background; worth trying extract_track_from_mix again, it will likely find the server "
+            "already up.",
+        )
+
+    async def _ensure_base_checkpoint_running(self, on_progress: ProgressCallback | None) -> bool:
+        """Returns True if a checkpoint swap happened (caller should
+        restore the default checkpoint afterward via
+        _restore_default_checkpoint), False if Base was already running
+        (left alone - not this method's place to disturb a setup someone
+        already deliberately chose, e.g. a human who set
+        SONGFORGE_ACESTEP_CHECKPOINT=acestep-v15-xl-base themselves).
+
+        Automated, not the manual-restart-only design GradioServer.
+        CHECKPOINT's own comment originally called for - a deliberate
+        product decision to override that: this server's actual users
+        interact through a chat client, not a terminal, and have no real
+        path to restart a background process themselves. Kept safe two
+        ways: this always runs inside the same cross-process generation
+        lock every extract_track call already holds before reaching
+        here, so a swap can never race a generation actually in progress
+        elsewhere; and _stop_server_process terminates gracefully
+        (SIGTERM-equivalent, then kill only after a timeout) rather than
+        an abrupt kill."""
+        if await asyncio.to_thread(self._is_server_up):
+            if await self._server_supports_extract():
+                return False
+            if on_progress:
+                await on_progress(
+                    0.0,
+                    "Switching ACE-Step to the Base checkpoint for extraction - this restarts "
+                    "the server and takes a minute or two",
+                )
+            await asyncio.to_thread(_stop_server_process, GradioServer.PORT)
+            # Real, confirmed race: launching the new checkpoint
+            # immediately after stopping the old one can start a second
+            # heavy CUDA init before the GPU driver has actually reclaimed
+            # VRAM from the just-terminated process - on this project's
+            # own "marginal" VRAM tier (see Timeouts.CHECKPOINT_SWAP_STARTUP)
+            # that was enough to blow past the startup timeout entirely.
+            await asyncio.sleep(Timeouts.CHECKPOINT_SWAP_SETTLE_SECONDS)
+        elif on_progress:
+            await on_progress(0.0, "Starting ACE-Step with the Base checkpoint for extraction")
+        await self._launch_server_with_checkpoint(self._BASE_CHECKPOINT)
+        await self._wait_for_server_and_extract_mode(on_progress)
+        return True
+
+    async def _restore_default_checkpoint(self, on_progress: ProgressCallback | None) -> None:
+        """Swaps back to this server's configured default checkpoint
+        (GradioServer.CHECKPOINT, normally SFT) after an extract_track
+        call that had to swap to Base - restores the everyday generation
+        quality the user actually expects by default (confirmed via this
+        project's own A/B listening test: SFT rated clearly better for
+        normal generation; Base is only needed for extract/lego/complete).
+        Best-effort on confirming the restored server is fully up - if it
+        isn't yet, the next real generate() call simply waits it out via
+        its own ensure_server_running startup poll, so nothing is lost by
+        not blocking longer here."""
+        if on_progress:
+            await on_progress(0.99, "Restoring the default ACE-Step checkpoint")
+        await asyncio.to_thread(_stop_server_process, GradioServer.PORT)
+        # Same VRAM-reclamation race _ensure_base_checkpoint_running's own
+        # comment describes - applies symmetrically on the way back down.
+        await asyncio.sleep(Timeouts.CHECKPOINT_SWAP_SETTLE_SECONDS)
+        await self._launch_server_with_checkpoint(GradioServer.CHECKPOINT)
+        try:
+            deadline = time.time() + Timeouts.CHECKPOINT_SWAP_STARTUP
+            while time.time() < deadline:
+                if await asyncio.to_thread(self._is_server_up):
+                    return
+                await asyncio.sleep(3)
+        except Exception:
+            pass
+
+    async def extract_track(
+        self,
+        source_audio_path: str,
+        track_name: str,
+        on_progress: ProgressCallback | None = None,
+    ) -> dict:
+        """Isolates a single named track (e.g. "keyboard", "vocals",
+        "drums") from an existing mix via ACE-Step's Extract generation
+        mode - the real, purpose-built mechanism for this, unlike Remix
+        (whole-mix conditioning, confirmed to just reproduce or garble
+        the source rather than isolate any part of it - see generate()'s
+        remix_source_path docs).
+
+        track_name must be one of GradioServer.EXTRACT_TRACK_NAMES (ACE-
+        Step's own fixed vocabulary - note "keyboard" covers piano, there
+        is no separate "piano" option).
+
+        Extract mode only exists under ACE-Step's Base checkpoint
+        (acestep-v15-xl-base), not the default SFT checkpoint this server
+        normally runs (SFT confirmed clearly better for everyday
+        generation via this project's own A/B listening test, which is
+        why it stays the default). This method automatically swaps the
+        running server to Base for the call and back to the default
+        checkpoint afterward - a real, unavoidable cost of roughly a
+        minute or two PER swap (so ~2-4 minutes total on top of the
+        actual extraction) - warn the user before calling this that it
+        will take several minutes, most of it checkpoint loading, not
+        extraction itself. See _ensure_base_checkpoint_running's own
+        docstring for why this is automated rather than requiring a
+        manual restart, and for the safety guarantees around it.
+
+        Returns {"audio_path": str, "generation_seconds": float}."""
+        self._require_configured()
+        if track_name not in GradioServer.EXTRACT_TRACK_NAMES:
+            raise SongForgeMCPError(
+                ErrorCode.INVALID_PARAMETER,
+                f"track_name must be one of {sorted(GradioServer.EXTRACT_TRACK_NAMES)}, got {track_name!r}",
+            )
+        if not os.path.isfile(source_audio_path):
+            raise SongForgeMCPError(
+                ErrorCode.FILE_NOT_FOUND, f"source_audio_path does not exist: {source_audio_path}"
+            )
+
+        async with self._lock:
+            ensure_private_dir(Paths.OUTPUT_ROOT)
+            lock_path = os.path.join(Paths.OUTPUT_ROOT, ".acestep_generate.lock")
+            deadline = time.time() + Timeouts.GENERATION
+            acquired = False
+            while time.time() < deadline:
+                if await asyncio.to_thread(self._acquire_generate_lock, lock_path):
+                    acquired = True
+                    break
+                if on_progress:
+                    await on_progress(
+                        0.0, "Another generation is already in progress on this machine — waiting for it to finish"
+                    )
+                await asyncio.sleep(3)
+            if not acquired:
+                raise SongForgeMCPError(
+                    ErrorCode.SUBPROCESS_TIMEOUT,
+                    "timed out waiting for another in-progress generation to finish",
+                )
+            try:
+                swapped = await self._ensure_base_checkpoint_running(on_progress)
+                try:
+                    return await self._run_extraction(source_audio_path, track_name, on_progress)
+                finally:
+                    if swapped:
+                        await self._restore_default_checkpoint(on_progress)
+            finally:
+                try:
+                    os.remove(lock_path)
+                except OSError:
+                    pass
+
+    async def _run_extraction(
+        self, source_audio_path: str, track_name: str, on_progress: ProgressCallback | None
+    ) -> dict:
+        start_time = time.time()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            try:
+                page = await browser.new_page(viewport={"width": 1600, "height": 2400})
+                try:
+                    await page.goto(GradioServer.URL, timeout=60000)
+                except Exception as e:
+                    raise SongForgeMCPError(
+                        ErrorCode.SUBPROCESS_FAILED, f"could not reach ACE-Step UI: {e}"
+                    ) from e
+                await page.wait_for_timeout(4000)
+
+                extract_radio = page.get_by_label("Extract", exact=True).first
+                if await extract_radio.count() == 0:
+                    raise SongForgeMCPError(
+                        ErrorCode.EXTRACT_MODE_NOT_AVAILABLE,
+                        "Extract mode is unexpectedly unavailable even after switching to the "
+                        "Base checkpoint - the checkpoint swap may not have completed correctly.",
+                    )
+                await extract_radio.check(timeout=10000)
+                await page.wait_for_timeout(1500)
+
+                src_section = page.locator("text=Source Audio").locator(
+                    "xpath=ancestor::*[contains(@class,'block')][1]"
+                )
+                await src_section.locator("input[type='file']").first.set_input_files(source_audio_path)
+                try:
+                    await src_section.locator("audio").first.wait_for(state="attached", timeout=20000)
+                except Exception as e:
+                    raise SongForgeMCPError(
+                        ErrorCode.SUBPROCESS_FAILED,
+                        "source audio did not register in the UI within 20s - extraction would "
+                        "have run without it",
+                    ) from e
+                await page.wait_for_timeout(1000)
+
+                # Real Track Name selection requires clicking the
+                # dropdown's own option element - typing/filling (the
+                # generic approach _set_field_by_label uses for other
+                # fields) only updates the visible input text without
+                # firing ACE-Step's actual backend selection event.
+                # Confirmed live: output metadata came back with an empty
+                # caption/track reference the one time this used the
+                # generic fill-based setter instead of a direct option
+                # click.
+                track_field = page.get_by_label("Track Name", exact=True).first
+                await track_field.click(timeout=5000)
+                await page.wait_for_timeout(500)
+                option = page.locator("li[role='option']", has_text=track_name).first
+                if await option.count() == 0:
+                    raise SongForgeMCPError(
+                        ErrorCode.INVALID_PARAMETER,
+                        f"track_name {track_name!r} was not found as a Track Name dropdown option",
+                    )
+                await option.click(timeout=5000)
+                await page.wait_for_timeout(500)
+                actual_value = await track_field.input_value(timeout=3000)
+                if actual_value != track_name:
+                    raise SongForgeMCPError(
+                        ErrorCode.SYNTHESIS_FAILED,
+                        f"Track Name selection did not take effect - wanted {track_name!r}, "
+                        f"field reads {actual_value!r}",
+                    )
+                # The option list stays open/overlaid after selection and
+                # physically intercepts clicks on whatever's underneath it
+                # (confirmed live: blocked the Extract Stem button
+                # entirely) - close it before proceeding.
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(500)
+
+                # Extract mode defaults to Batch Size 2 (two independent
+                # takes) same as every other mode - force 1 so a single
+                # extract_track call doesn't silently cost 2x the GPU time,
+                # matching generate()'s own established fix for the
+                # identical default. Best-effort: not fatal if this field
+                # can't be found/set here - falling back to 2 takes and
+                # returning the first is still correct, just slower.
+                try:
+                    await self._set_field_by_label(page, "Batch Size", 1)
+                except SongForgeMCPError:
+                    pass
+
+                if on_progress:
+                    await on_progress(0.5, f"Extracting the {track_name} track")
+
+                await page.get_by_role("button", name="Extract Stem", exact=False).click(timeout=15000)
+                await page.wait_for_timeout(5000)
+
+                deadline = time.time() + Timeouts.GENERATION
+                status_value = ""
+                while time.time() < deadline:
+                    status_box = (
+                        page.locator("text=Generation Status")
+                        .locator("..")
+                        .locator("textarea, input")
+                        .first
+                    )
+                    try:
+                        status_value = await status_box.input_value(timeout=2000)
+                    except Exception:
+                        status_value = ""
+                    if "Complete" in status_value:
+                        if on_progress:
+                            await on_progress(0.9, "Extraction complete")
+                        break
+                    if "Error" in status_value or "Failed" in status_value:
+                        raise SongForgeMCPError(
+                            ErrorCode.SYNTHESIS_FAILED, f"ACE-Step reported: {status_value}"
+                        )
+                    if on_progress:
+                        elapsed = time.time() - start_time
+                        fraction = min(0.5 + (elapsed / Timeouts.GENERATION) * 0.4, 0.89)
+                        await on_progress(fraction, f"Extracting - {elapsed:.0f}s elapsed")
+                    await page.wait_for_timeout(8000)
+                else:
+                    raise SongForgeMCPError(
+                        ErrorCode.SUBPROCESS_TIMEOUT,
+                        f"Extraction did not complete within {Timeouts.GENERATION}s",
+                    )
+            finally:
+                await browser.close()
+
+        output_dir = os.path.join(self.acestep_home, "gradio_outputs")
+        # Extract mode's output is always mp3 regardless of the normal
+        # Audio Format setting (confirmed live: output metadata shows
+        # "audio_format": "mp3" without touching that setting at all).
+        candidates = [f for f in Path(output_dir).rglob("*.mp3") if f.stat().st_mtime >= start_time]
+        if not candidates:
+            raise SongForgeMCPError(
+                ErrorCode.SYNTHESIS_FAILED,
+                "ACE-Step reported completion but no new output file was found",
+            )
+        newest = max(candidates, key=lambda f: f.stat().st_mtime)
+        final_path = os.path.join(Paths.OUTPUT_DIR, f"extract_{track_name}_{int(start_time)}{newest.suffix}")
+        output_dir_final = os.path.dirname(final_path)
+        if output_dir_final:
+            ensure_private_dir(output_dir_final)
+        shutil.copy(str(newest), final_path)
+        return {
+            "audio_path": final_path,
+            "generation_seconds": round(time.time() - start_time, 1),
         }

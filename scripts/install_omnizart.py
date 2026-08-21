@@ -170,10 +170,19 @@ def _create_tuned_piano_checkpoint(env_dir: Path) -> None:
     text = config_path.read_text()
     # OnsetTh's "Value: 4" is the only "Value: N\n" (single digit, no
     # decimal) in this file at the time of writing - confirmed by
-    # inspection, not assumed. If a future Omnizart release changes this
-    # file's layout, this becomes a harmless no-op (the stock checkpoint
-    # gets copied unmodified) rather than silently editing the wrong field,
-    # since replace() only touches an exact, whole-line match.
+    # inspection, not assumed. Checking the count explicitly (rather than
+    # trusting replace(..., 1) to only ever touch OnsetTh) means a future
+    # Omnizart release adding a second "Value: 4" line raises here instead
+    # of silently mis-tuning whichever field happens to come first in the
+    # file.
+    match_count = text.count("Value: 4\n")
+    if match_count != 1:
+        raise RuntimeError(
+            f"expected exactly one 'Value: 4' line in {config_path} (OnsetTh), "
+            f"found {match_count} - Omnizart's configurations.yaml layout may "
+            "have changed; update this script's replacement logic instead of "
+            "guessing which one is OnsetTh."
+        )
     text = text.replace("Value: 4\n", f"Value: {TUNED_ONSET_TH}\n", 1)
     config_path.write_text(text)
 

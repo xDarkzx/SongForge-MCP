@@ -237,6 +237,34 @@ def test_transcribe_to_midi_is_idempotent_and_skips_model_when_output_exists(tmp
     assert result["chords_note_count"] == 2
 
 
+def test_transcribe_to_midi_cache_hit_includes_measured_bpm(tmp_path):
+    # Regression test: the fresh-run path has always returned measured_bpm
+    # (documented in the docstring, relied on by callers); the cache-hit
+    # branch was silently missing it, an inconsistent response shape for
+    # the identical (audio_path, settings) request depending only on
+    # whether it happened to be the first call or a later, cached one.
+    output_path = tmp_path / "out.mid"
+    tagged_path = _tagged(output_path, midi_tempo=100.0)
+    base, ext = os.path.splitext(tagged_path)
+
+    pm = pretty_midi.PrettyMIDI(initial_tempo=100.0)
+    instrument = pretty_midi.Instrument(program=0)
+    instrument.notes = [pretty_midi.Note(velocity=100, pitch=60, start=0.0, end=0.5)]
+    pm.instruments.append(instrument)
+    pm.write(tagged_path)
+    _write_simple_midi(f"{base}_bass{ext}", 0)
+    _write_simple_midi(f"{base}_melody{ext}", 1)
+    _write_simple_midi(f"{base}_chords{ext}", 0)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("predict() must not be called when output already exists")
+
+    with patch("songforge_mcp.midi_transcription.predict", side_effect=fail_if_called):
+        result = transcribe_to_midi("input.wav", str(output_path), midi_tempo=100.0)
+
+    assert result["measured_bpm"] == pytest.approx(100.0)
+
+
 def test_transcribe_to_midi_reruns_when_a_split_file_is_missing(tmp_path):
     output_path = tmp_path / "out.mid"
     _write_simple_midi(_tagged(output_path), 5)

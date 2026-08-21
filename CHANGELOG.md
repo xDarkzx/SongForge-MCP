@@ -2,6 +2,119 @@
 
 ## Unreleased
 
+- **Fixed a real `extract_track_from_mix` checkpoint-swap timeout,
+  confirmed live the same day the tool shipped.** A swap timed out past
+  the 300s server-startup budget while GPU memory was still at ~96%
+  utilization from the checkpoint being replaced - an immediate retry
+  succeeded in under 2.5 minutes, consistent with a not-yet-reclaimed-
+  VRAM race (launching the new checkpoint immediately after stopping the
+  old one, before the driver actually freed its memory) rather than a
+  genuinely stuck process. Fixed two ways: a
+  `Timeouts.CHECKPOINT_SWAP_SETTLE_SECONDS` (10s) pause after stopping
+  the old server and before launching the new one, on both the swap-to-
+  Base and restore-to-default paths; and a dedicated, more generous
+  `Timeouts.CHECKPOINT_SWAP_STARTUP` (480s vs. the general 300s) for the
+  swap's own startup poll, since this project's own hardware is already
+  documented (see `SERVER_STARTUP`'s comment) as "marginal" VRAM tier for
+  the XL DiT model even without a swap's extra pressure.
+- **Added `extract_track_from_mix`: real per-instrument isolation from a
+  mix, via ACE-Step's Extract generation mode.** The actual purpose-built
+  mechanism for "give me back just the piano/vocals/drums part of this
+  song" - unlike `generate_vocal_track`'s Remix mode, which is confirmed
+  to just reproduce or garble the whole source, never isolate a part of
+  it. Requires ACE-Step's Base checkpoint (`acestep-v15-xl-base`), which
+  is not this server's default (SFT confirmed clearly better for everyday
+  generation via a real A/B listening test on identical caption/lyrics -
+  Base is real but noticeably rougher for normal use, matching ACE-Step's
+  own docs calling SFT out as "Highest quality" and Base as "All tasks
+  including extract/lego/complete", not a quality claim).
+  - Ships as an automated checkpoint swap (Base for the call, SFT
+    restored afterward) rather than requiring a manual server restart -
+    a deliberate override of `GradioServer.CHECKPOINT`'s own original
+    "manual restart only" design comment, since this server's actual
+    users interact through a chat client with no path to restart a
+    background process themselves. Kept safe by only ever swapping
+    inside the same cross-process generation lock every other
+    generation on this server already respects (a swap can never race
+    an in-progress generation elsewhere) and by a graceful
+    terminate-then-kill stop sequence, not an abrupt kill.
+  - `ACEStepClient` moved into `shared_state.py` alongside
+    `SeparatorClient`/`JobRegistry` (was previously instantiated
+    per-module in `generate_tools.py`) - the identical GPU-race bug
+    class `shared_state.py`'s own docstring already warns about for
+    `SeparatorClient` would otherwise apply here too, since
+    `extract_track`'s checkpoint swap and lock both live on the
+    instance, not the class.
+  - Real, confirmed UI bug found and worked around while building this:
+    ACE-Step's Track Name dropdown (Extract mode's only real input
+    besides the source audio) accepts a naive fill/select without error,
+    and the visible field even shows the right text - but the real
+    backend selection event never fires, so the extraction silently runs
+    against no track filter at all (confirmed by inspecting output
+    metadata: `caption`/`instruction` came back empty). Fixed by clicking
+    the dropdown's actual option element instead of the generic
+    fill-based field setter used elsewhere.
+  - Verified end-to-end against a live server three times: the
+    already-Base fast path (no swap), the full SFT-to-Base-to-SFT swap
+    cycle, and the real Track Name selection reaching ACE-Step's backend
+    (confirmed via output metadata, not just a non-throwing call).
+- **Closed a real loophole where `generate_vocal_track_takes` rejecting
+  `num_takes=1` got silently "fixed" by rounding up to 2 takes** — doubling
+  generation time against what the user actually asked for, instead of
+  surfacing the error or switching to `generate_vocal_track` (the correct
+  tool for a single take). The `VALUE_OUT_OF_RANGE` error now explicitly
+  names `generate_vocal_track` as the right call for `num_takes=1`, and
+  the docstring says the same — no ambiguous "just clamp to the minimum"
+  reading left for a calling model to rationalize around.
+- **Fixed `generate_vocal_track_takes` silently failing on every take: the
+  "Seed" field ACE-Step's UI has always exposed stopped being reachable by
+  its accessible label.** Confirmed live against a running server -
+  `get_by_label("Seed", exact=True)` matches nothing at all (not a wording
+  change like the earlier "Key" fix - the field's own label text is still
+  exactly "Seed", it's just not aria-associated with its `<textarea>`), and
+  it has no placeholder to fall back on either. `_set_field_by_label` now
+  resolves "Seed" via its containing block's own text (the same "text=X ->
+  ancestor block -> inner control" pattern already used for Remix mode's
+  Source Audio/Remix Strength fields), and also unchecks the "Random Seed"
+  checkbox first (checked by default in the live UI, which was silently
+  overriding any value the field held) - the same auto-checkbox pattern
+  already used for BPM/Key/TimeSig/etc. `generate_vocal_track` (the plain
+  single-track tool) never sets "Seed" and was never affected - only
+  `generate_vocal_track_takes` (which sets a per-take Seed for variation)
+  hit this, crashing before Generate was ever clicked, hence no output
+  file. Verified end-to-end (fill + read-back round-tripped correctly)
+  against a live ACE-Step server, not just unit-mocked.
+- **Fixed real bugs found by code review on the Omnizart integration before
+  it shipped**:
+  - `omnizart_client.transcribe_with_omnizart` was applying `_close_gaps`
+    (documented as requiring a single pitch/line - see its docstring) to
+    the full flat, multi-pitch note list. On Piano mode (the default,
+    inherently polyphonic), this could stretch one note's end into an
+    unrelated, different-pitch note's onset just because they were
+    chronologically close, corrupting note durations on exactly the
+    polyphonic-piano case this feature was built to improve. Now groups
+    by pitch (and by instrument, for multi-instrument Pop/Stream output)
+    before closing gaps, same grouping `_merge_close_notes` already uses.
+  - `midi_transcription.transcribe_to_midi`'s cache-hit branch omitted
+    `measured_bpm`, which the fresh-run branch (and this tool's own
+    docstring) always includes - a caller relying on that key would get
+    a `KeyError` on a second call with identical settings. Now reads the
+    tempo back from the cached file, matching `omnizart_client`'s own
+    cache-hit pattern.
+  - `omnizart_client`'s per-chunk subprocess call had neither the
+    `subprocess.TimeoutExpired` → `SUBPROCESS_TIMEOUT` handling nor the
+    GPU-contention `threading.Lock` that `separator_client.py` already
+    has for the identical reasons (both now added, matching that
+    established pattern).
+  - `_resolve_model_path`'s tuned-checkpoint lookup now also requires the
+    stock `music_piano` checkpoint to exist alongside a candidate
+    `checkpoints/music` directory - a much more specific signal that the
+    directory actually belongs to Omnizart, not an unrelated package
+    that happens to share that naming.
+  - `scripts/install_omnizart.py`'s `OnsetTh` patch now verifies exactly
+    one `"Value: 4"` line exists before editing it, raising instead of
+    silently mis-tuning the wrong field if a future Omnizart release
+    changes the file's layout.
 - **Tuned Omnizart's Piano model via a systematic threshold sweep, not a
   guess**: scored `OnsetTh` values 4 (Omnizart's own stock default) down
   to 1.5 against independent onset detection on real audio (not the

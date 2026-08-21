@@ -18,11 +18,23 @@ for _stream in (sys.stdout, sys.stdin, sys.stderr):
     except AttributeError:
         pass
 
-from mcp.server.fastmcp import FastMCP
+from songforge_mcp.banner import print_ready_banner, print_startup_banner
+from songforge_mcp.shared_state import jobs as _jobs
 
-from songforge_mcp.instructions import load_instructions
-from songforge_mcp.tool_registry import register_all_tools
-from songforge_mcp.tools.generate_tools import _client as _acestep_client
+# Printed here, before importing tool_registry (below), on purpose: some
+# tool modules (e.g. midi_tools, via basic-pitch) print noisy
+# third-party import-time warnings (missing optional coreml/tflite/onnx
+# backends, TensorFlow's own startup logging) straight to stderr. Doing
+# this import-time banner print first means those warnings land after the
+# banner instead of before it, in the same console window.
+print_startup_banner(_jobs)
+
+from mcp.server.fastmcp import FastMCP  # noqa: E402
+
+from songforge_mcp.instructions import load_instructions  # noqa: E402
+from songforge_mcp.tool_registry import register_all_tools  # noqa: E402
+from songforge_mcp.tools.generate_tools import _client as _acestep_client  # noqa: E402
+from songforge_mcp_shared.constants import GradioServer  # noqa: E402
 
 
 @asynccontextmanager
@@ -44,9 +56,8 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[dict]:
     """
     async def warm_up() -> None:
         try:
-            sys.stderr.write("[songforge-mcp] warming up ACE-Step server in the background...\n")
             await _acestep_client.ensure_server_running()
-            sys.stderr.write("[songforge-mcp] ACE-Step server is warm and ready\n")
+            print_ready_banner(GradioServer.CHECKPOINT)
         except Exception as e:
             sys.stderr.write(f"[songforge-mcp] ACE-Step warm-up did not complete: {e}\n")
 

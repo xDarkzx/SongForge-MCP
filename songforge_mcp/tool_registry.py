@@ -20,6 +20,7 @@ _EXPECTED_MODULES = frozenset(
         "playback_tools",
         "track_management_tools",
         "audio_edit_tools",
+        "extract_tools",
     }
 )
 

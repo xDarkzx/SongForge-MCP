@@ -224,6 +224,69 @@ real audio file), `SEPARATOR_NOT_CONFIGURED` (see
 [`docs/INSTALLATION.md`](INSTALLATION.md)), `SUBPROCESS_TIMEOUT`,
 `SEPARATION_FAILED`.
 
+## `extract_track_from_mix(source_audio_path, track_name) -> dict`
+
+Starts isolating a single named track (e.g. `"keyboard"`, `"vocals"`,
+`"drums"`) out of an existing mix via ACE-Step's Extract generation
+mode — the real, purpose-built mechanism for "give me back just the X
+part of this song." Do not use `generate_vocal_track`'s
+`remix_source_path` for this — Remix mode is confirmed to just
+reproduce or garble the whole source rather than isolate any part of
+it. **Returns immediately** with a `job_id` — poll
+`check_vocal_track_status` exactly as for `generate_vocal_track`.
+
+**Real, unavoidable cost — warn the user before calling this.** This
+server normally runs ACE-Step's SFT checkpoint (confirmed clearly
+better for everyday generation via a real A/B listening test), but
+Extract mode only exists under ACE-Step's Base checkpoint. This tool
+automatically swaps the server to Base for the call and back to SFT
+afterward — roughly a minute or two per swap on top of the actual
+extraction, so a typical call takes several minutes total, most of it
+checkpoint loading, not extraction. It will not interrupt a
+`generate_vocal_track` call already in progress elsewhere — the swap
+only runs inside the same cross-process generation lock every
+generation on this server already respects, so it simply waits its
+turn instead of racing it.
+
+**Arguments**
+
+- `source_audio_path` *(required)* — local path to the existing mix to
+  extract from (the full song, not a pre-separated stem) — e.g. an
+  earlier `generate_vocal_track` result or `split_vocal_stems`'
+  `instrumental_path`.
+- `track_name` *(required)* — one of `woodwinds`, `brass`, `fx`,
+  `synth`, `strings`, `percussion`, `keyboard`, `guitar`, `bass`,
+  `drums`, `backing_vocals`, `vocals` — ACE-Step's own fixed
+  vocabulary. Note **`keyboard` covers piano** — there is no separate
+  `"piano"` option.
+
+**Returns**
+
+```json
+{ "job_id": "5e9d2b3a-..." }
+```
+
+On completion:
+
+```json
+{
+  "audio_path": "C:\\...\\renders\\extract_keyboard_....mp3",
+  "diagnostics": { "generation_seconds": 49.4 }
+}
+```
+
+Output is always `.mp3`, regardless of any other tool's `output_format`
+default — confirmed from ACE-Step's own Extract-mode output metadata.
+Extraction quality on real mixed audio has not been extensively
+validated by this project yet — treat results as worth a real listen,
+not something to trust as correct by default.
+
+**Raises** `SongForgeMCPError` — `INVALID_PARAMETER` (`track_name` not
+in the fixed vocabulary above), `FILE_NOT_FOUND`,
+`ACESTEP_NOT_CONFIGURED`, `EXTRACT_MODE_NOT_AVAILABLE` (the Base
+checkpoint swap didn't complete correctly — a real, rare failure, not
+routine), `SUBPROCESS_TIMEOUT`, `SUBPROCESS_FAILED`, `SYNTHESIS_FAILED`.
+
 ## `list_separator_models(vocal_only=True) -> dict`
 
 Lists `audio-separator`'s available models, sorted by vocal SDR score

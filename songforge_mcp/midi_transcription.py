@@ -370,7 +370,12 @@ def transcribe_to_midi(
 
     split_paths = _split_paths_for(output_path)
     if os.path.isfile(output_path) and all(os.path.isfile(p) for p in split_paths.values()):
-        result = {"midi_path": output_path, "note_count": _count_midi_notes(output_path)}
+        cached_tempi = pretty_midi.PrettyMIDI(output_path).get_tempo_changes()[1]
+        result = {
+            "midi_path": output_path,
+            "note_count": _count_midi_notes(output_path),
+            "measured_bpm": round(cached_tempi[0], 1) if len(cached_tempi) else None,
+        }
         for name, path in split_paths.items():
             result[f"{name}_midi_path"] = path
             result[f"{name}_note_count"] = _count_midi_notes(path)

@@ -339,11 +339,18 @@ def test_generate_vocal_track_job_reports_error_status(monkeypatch):
 
 
 def test_generate_vocal_track_takes_rejects_too_few_takes():
+    # Regression test for a real incident: the calling model hit this
+    # exact error for num_takes=1, then silently rounded up to 2 takes
+    # instead of surfacing the error or switching tools - doubling
+    # generation time against what the user actually asked for. The
+    # error message must name generate_vocal_track directly so there's
+    # no ambiguous "just clamp to the minimum" reading left.
     mcp = _register()
     tool = mcp._tool_manager.get_tool("generate_vocal_track_takes")
     with pytest.raises(SongForgeMCPError) as exc_info:
         asyncio.run(tool.fn(caption="melodic dubstep", lyrics="[verse]\nwords", ctx=_StubContext(), num_takes=1))
     assert exc_info.value.code == ErrorCode.VALUE_OUT_OF_RANGE
+    assert "generate_vocal_track" in exc_info.value.message
 
 
 def test_generate_vocal_track_takes_rejects_too_many_takes():

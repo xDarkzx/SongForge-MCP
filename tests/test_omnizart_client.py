@@ -1,5 +1,6 @@
 import os
 import platform
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -92,6 +93,11 @@ def test_resolve_model_path_uses_tuned_checkpoint_when_present(tmp_path):
     python_exe.write_text("")
 
     music_dir = venv_dir / _lib_dir_name() / "site-packages" / "omnizart" / "checkpoints" / "music"
+    # The tuned checkpoint's stock sibling always exists in a real install
+    # (install_omnizart.py creates the tuned copy FROM it) - _resolve_model_path
+    # requires it as a signal this is really Omnizart's own checkpoint tree,
+    # not an unrelated package's same-named directory.
+    (music_dir / "music_piano").mkdir(parents=True)
     tuned_dir = music_dir / OmnizartTranscription.TUNED_PIANO_CHECKPOINT_NAME
     tuned_dir.mkdir(parents=True)
 
@@ -257,6 +263,40 @@ def test_transcribe_with_omnizart_merges_fragments_across_chunk_output(tmp_path,
     assert result["note_count"] == 1
 
 
+def test_transcribe_with_omnizart_does_not_close_gaps_across_different_pitches(tmp_path, monkeypatch):
+    # Regression test: _close_gaps assumes a single pitch/line (see its
+    # docstring in midi_transcription.py) - applying it to the flat,
+    # all-pitches-mixed note list Omnizart's default Piano mode produces
+    # would wrongly stretch one note's end into an unrelated, different-
+    # pitch note's onset just because they're chronologically close.
+    python_exe = _make_fake_venv(tmp_path)
+    monkeypatch.setenv("SONGFORGE_OMNIZART_PYTHON", python_exe)
+
+    audio_path = tmp_path / "input.wav"
+    _write_wav(audio_path, seconds=3.0)
+
+    def fake_run(cmd, **kwargs):
+        output_idx = cmd.index("--output") + 1
+        chunk_midi = cmd[output_idx]
+        # Two different-pitch notes with a small (legato-closeable) gap
+        # between them - must NOT be glued together despite the gap
+        # being small enough that same-pitch notes would be.
+        _write_chunk_midi(chunk_midi, [_note(60, 0.0, 0.5), _note(64, 0.6, 1.0)])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("songforge_mcp.omnizart_client.subprocess.run", side_effect=fake_run):
+        result = transcribe_with_omnizart(
+            str(audio_path), str(tmp_path / "out.mid"),
+            chunk_seconds=30.0, midi_tempo=120.0,
+        )
+
+    assert result["note_count"] == 2
+    pm = pretty_midi.PrettyMIDI(result["midi_path"])
+    notes_by_pitch = {n.pitch: n for inst in pm.instruments for n in inst.notes}
+    assert notes_by_pitch[60].end == pytest.approx(0.5)  # not stretched to 0.6
+    assert notes_by_pitch[64].start == pytest.approx(0.6)
+
+
 def test_transcribe_with_omnizart_raises_on_nonzero_exit_code(tmp_path, monkeypatch):
     python_exe = _make_fake_venv(tmp_path)
     monkeypatch.setenv("SONGFORGE_OMNIZART_PYTHON", python_exe)
@@ -273,6 +313,26 @@ def test_transcribe_with_omnizart_raises_on_nonzero_exit_code(tmp_path, monkeypa
                 str(audio_path), str(tmp_path / "out.mid"), midi_tempo=120.0,
             )
     assert exc_info.value.code == ErrorCode.OMNIZART_TRANSCRIPTION_FAILED
+
+
+def test_transcribe_with_omnizart_raises_subprocess_timeout_as_songforge_error(tmp_path, monkeypatch):
+    # Matches SeparatorClient's established pattern: a raw
+    # subprocess.TimeoutExpired must never escape to the caller as-is.
+    python_exe = _make_fake_venv(tmp_path)
+    monkeypatch.setenv("SONGFORGE_OMNIZART_PYTHON", python_exe)
+
+    audio_path = tmp_path / "input.wav"
+    _write_wav(audio_path, seconds=2.0)
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 0))
+
+    with patch("songforge_mcp.omnizart_client.subprocess.run", side_effect=fake_run):
+        with pytest.raises(SongForgeMCPError) as exc_info:
+            transcribe_with_omnizart(
+                str(audio_path), str(tmp_path / "out.mid"), midi_tempo=120.0,
+            )
+    assert exc_info.value.code == ErrorCode.SUBPROCESS_TIMEOUT
 
 
 def test_transcribe_with_omnizart_raises_when_output_file_missing_despite_success(tmp_path, monkeypatch):
@@ -393,6 +453,7 @@ def test_transcribe_with_omnizart_cache_key_changes_when_tuned_checkpoint_appear
     python_exe_tuned.write_text("")
     (venv2 / ("Scripts" if platform.system() == "Windows" else "bin") / _EXE_NAME).write_text("")
     music_dir = venv2 / _lib_dir_name() / "site-packages" / "omnizart" / "checkpoints" / "music"
+    (music_dir / "music_piano").mkdir(parents=True)
     (music_dir / OmnizartTranscription.TUNED_PIANO_CHECKPOINT_NAME).mkdir(parents=True)
 
     with patch("songforge_mcp.omnizart_client.subprocess.run", side_effect=fake_run):

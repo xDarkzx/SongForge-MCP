@@ -3,10 +3,13 @@ import random
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from songforge_mcp.acestep_client import ACEStepClient
 from songforge_mcp.audio_analysis import analyze_audio
 from songforge_mcp.media_player import play_audio_now
-from songforge_mcp.shared_state import jobs as _jobs, separator_client as _separator_client
+from songforge_mcp.shared_state import (
+    acestep_client as _client,
+    jobs as _jobs,
+    separator_client as _separator_client,
+)
 from songforge_mcp.youtube_reference import YouTubeReferenceClient
 from songforge_mcp_shared.error_codes import ErrorCode, SongForgeMCPError
 from songforge_mcp_shared.protocol import (
@@ -20,7 +23,6 @@ from songforge_mcp_shared.protocol import (
 _MIN_TAKES = 2
 _MAX_TAKES = 5
 
-_client = ACEStepClient()
 _youtube_client = YouTubeReferenceClient()
 
 
@@ -265,8 +267,9 @@ def register(mcp: FastMCP):
         (generate_vocal_track, generate_vocal_track_takes,
         split_vocal_stems, analyze_reference_audio,
         transcribe_instrumental_to_midi, edit_audio_track,
-        prepare_voice_reference) — they all share this one status tool
-        and one registry. Waits up to wait_seconds server-side if still
+        prepare_voice_reference, extract_track_from_mix) — they all
+        share this one status tool and one registry. Waits up to
+        wait_seconds server-side if still
         running (capped at 25s) — call again immediately on "running",
         no extra delay needed.
 
@@ -332,7 +335,11 @@ def register(mcp: FastMCP):
             caption: Same as generate_vocal_track.
             lyrics: Same as generate_vocal_track.
             num_takes: How many independent takes to generate (2-5,
-                capped to prevent an accidentally very long request).
+                capped to prevent an accidentally very long request). If
+                the user only wants one, do not call this tool at all —
+                call generate_vocal_track instead. Do not round 1 up to
+                2 to satisfy this minimum; that silently doubles
+                generation time against the user's actual request.
             reference_audio_path: Same as generate_vocal_track, applied
                 identically to every take.
             reference_youtube_url: Same as generate_vocal_track.
@@ -356,10 +363,24 @@ def register(mcp: FastMCP):
         validate_caption(caption)
         validate_lyrics(lyrics)
         output_format = validate_output_format(output_format)
-        if not (_MIN_TAKES <= num_takes <= _MAX_TAKES):
+        if num_takes < _MIN_TAKES:
+            # Explicit redirect, not just a range error - a real, confirmed
+            # incident: this used to just say "must be between 2 and 5,
+            # got 1", and the calling model silently rounded up to 2 takes
+            # (roughly 2x the generation time) instead of surfacing the
+            # error or switching to the actual right tool for "I only want
+            # one." Naming generate_vocal_track directly here closes that
+            # loophole - there's no ambiguous range error left to
+            # rationalize around.
             raise SongForgeMCPError(
                 ErrorCode.VALUE_OUT_OF_RANGE,
-                f"num_takes must be between {_MIN_TAKES} and {_MAX_TAKES}, got {num_takes}",
+                f"num_takes must be at least {_MIN_TAKES} - for a single take, call "
+                f"generate_vocal_track instead of this tool, not num_takes=1.",
+            )
+        if num_takes > _MAX_TAKES:
+            raise SongForgeMCPError(
+                ErrorCode.VALUE_OUT_OF_RANGE,
+                f"num_takes must be at most {_MAX_TAKES}, got {num_takes}",
             )
         if reference_audio_path and reference_youtube_url:
             raise SongForgeMCPError(

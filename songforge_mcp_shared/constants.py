@@ -177,6 +177,15 @@ class GradioServer:
     # and their tradeoffs.
     CHECKPOINT = os.environ.get("SONGFORGE_ACESTEP_CHECKPOINT", "acestep-v15-xl-sft")
 
+    # ACE-Step's own acestep/constants.py TRACK_NAMES list, copied here so
+    # extract_track can validate a track_name up front (fail fast with a
+    # clear message) instead of a UI timeout when Playwright can't find a
+    # matching dropdown option. Keep in sync if ACE-Step's own list changes.
+    EXTRACT_TRACK_NAMES = frozenset({
+        "woodwinds", "brass", "fx", "synth", "strings", "percussion",
+        "keyboard", "guitar", "bass", "drums", "backing_vocals", "vocals",
+    })
+
 
 class Timeouts:
     # ACE-Step generation time varies a lot, and not just with luck: a
@@ -195,7 +204,66 @@ class Timeouts:
     # tier - raised to give real headroom for that documented case.
     # Still a generous ceiling chosen by reasoning about known
     # constraints, not a precisely tuned/benchmarked value.
-    SERVER_STARTUP = 300.0
+    #
+    # SERVER_STARTUP specifically (real, confirmed incident, 2026-08-21):
+    # this used to be a flat 300s wall-clock cutoff on the wait for
+    # ACE-Step's own checkpoint-load-then-bind-port sequence
+    # (ensure_server_running). After this project's own directory moved
+    # from an SSD to a slower drive, a real cold start measured directly
+    # in this project's own session logs took ~7 minutes (checkpoint
+    # shards alone: 50s/51s/75s per shard and climbing, then another
+    # ~1.5min for the 5Hz LM) - comfortably past 300s, so real, still-
+    # progressing loads were being reported as SUBPROCESS_TIMEOUT errors
+    # ("try again") even though nothing was actually stuck. Fixed by
+    # decoupling "give up" from raw elapsed time: ensure_server_running
+    # now only gives up when ACE-Step's own log file has been completely
+    # silent for SERVER_STARTUP_STALL_SECONDS (a real stall, the
+    # condition that actually indicates a hung process), and this
+    # constant becomes an outer safety-net ceiling that should rarely be
+    # hit in practice. Raised accordingly, and both are now overridable
+    # (SONGFORGE_ACESTEP_SERVER_STARTUP_TIMEOUT /
+    # SONGFORGE_ACESTEP_SERVER_STARTUP_STALL_SECONDS) for hardware this
+    # still isn't generous enough for.
+    SERVER_STARTUP = float(os.environ.get("SONGFORGE_ACESTEP_SERVER_STARTUP_TIMEOUT", "1800"))
+    # The real trigger for "ACE-Step's launch is stuck, stop waiting":
+    # no new bytes written to its own stdout/stderr log for this long.
+    # Sized off a real, directly observed silent gap during a genuinely
+    # healthy load (2026-08-21 session logs): ~155s of complete log
+    # silence between checkpoint-shard loading finishing and the 5Hz LM
+    # tokenizer's own log line starting (model handoff between stages
+    # produces no output). 300s gives real margin above that observed
+    # gap so a legitimately-loading server is never mistaken for a
+    # stalled one, while still catching an actually-hung process well
+    # before SERVER_STARTUP's much longer backstop ceiling.
+    SERVER_STARTUP_STALL_SECONDS = float(
+        os.environ.get("SONGFORGE_ACESTEP_SERVER_STARTUP_STALL_SECONDS", "300")
+    )
+    # extract_track's checkpoint swap is a heavier case than a normal cold
+    # start: it stops whatever's running and immediately loads a second
+    # full checkpoint on hardware ACE-Step's own GPU_COMPATIBILITY.md
+    # already calls "marginal" for the XL DiT model at this VRAM tier (see
+    # SERVER_STARTUP's own comment). Real, confirmed incident (2026-08-11):
+    # a swap timed out past the old SERVER_STARTUP's 300s on this exact
+    # hardware while VRAM was still at ~96% utilization from the checkpoint
+    # being replaced - a retry immediately after succeeded in under 2.5
+    # minutes, consistent with a not-yet-fully-reclaimed-VRAM race rather
+    # than a genuinely stuck process. CHECKPOINT_SWAP_SETTLE_SECONDS
+    # (below) is the other half of this fix; this wider ceiling is real
+    # headroom for whatever that settle delay doesn't fully cover, not a
+    # substitute for it. Same slow-drive reasoning as SERVER_STARTUP
+    # applies here too, and _wait_for_server_and_extract_mode now uses the
+    # same SERVER_STARTUP_STALL_SECONDS stall detection instead of a flat
+    # cutoff, for the same reason.
+    CHECKPOINT_SWAP_STARTUP = float(
+        os.environ.get("SONGFORGE_ACESTEP_CHECKPOINT_SWAP_STARTUP_TIMEOUT", "1800")
+    )
+    # How long to wait after stopping the old ACE-Step server process
+    # before launching the new one - gives the OS/GPU driver time to
+    # actually reclaim VRAM from the terminated process rather than
+    # racing a second heavy CUDA init against memory that isn't free yet
+    # (see CHECKPOINT_SWAP_STARTUP's comment for the real incident this
+    # is fixing).
+    CHECKPOINT_SWAP_SETTLE_SECONDS = 10.0
     GENERATION = 1800.0
     YOUTUBE_DOWNLOAD = 120.0
     # The ~5-15s this was originally sized around was observed with the
