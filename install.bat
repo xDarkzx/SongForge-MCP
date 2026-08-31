@@ -22,6 +22,19 @@ if errorlevel 1 (
     exit /b 0
 )
 
+REM This server's own venv needs >=3.10 (pyproject.toml) - unlike ACE-Step's
+REM narrower 3.11-3.12 requirement (checked separately in Step 4), any 3.10+
+REM works here. install.sh already enforces this floor; matching it here so
+REM a stale/old `python` on PATH fails fast with a clear message instead of
+REM silently building a broken venv.
+for /f "delims=" %%V in ('python -c "import sys; print(1 if sys.version_info >= (3, 10) else 0)" 2^>nul') do set "PY_OK=%%V"
+if not "%PY_OK%"=="1" (
+    echo Python on PATH is older than 3.10 - install Python 3.10+ ^(3.11 or
+    echo 3.12 recommended, to also satisfy ACE-Step's own requirement^) and
+    echo re-run this script.
+    exit /b 1
+)
+
 REM ---- Step 2: disk space check (ACE-Step's checkpoint alone is ~28GB) ----
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\check_disk_space.ps1" -RequiredGB 40
 if errorlevel 1 (
@@ -182,9 +195,9 @@ if /i not "!CONFIGURE_CLAUDE!"=="y" (
 if not exist "%CONFIG_DIR%" mkdir "%CONFIG_DIR%"
 
 if exist "%CONFIG_FILE%" (
-    findstr /c:"\"songforge\"" "%CONFIG_FILE%" >nul 2>&1
+    findstr /c:"\"songforge-mcp\"" "%CONFIG_FILE%" >nul 2>&1
     if !errorlevel! equ 0 (
-        echo Claude Desktop config already has a songforge entry - skipping.
+        echo Claude Desktop config already has a songforge-mcp entry - skipping.
         goto :skip_config
     )
     copy "%CONFIG_FILE%" "%CONFIG_FILE%.bak" >nul 2>&1
@@ -195,7 +208,7 @@ if exist "%CONFIG_FILE%" (
     echo.
     echo You need to MANUALLY add this inside your "mcpServers" block:
     echo.
-    echo   "songforge": {
+    echo   "songforge-mcp": {
     echo     "command": "%SONGFORGE_EXE%"
     echo   }
     echo.
@@ -207,7 +220,7 @@ if exist "%CONFIG_FILE%" (
 (
 echo {
 echo   "mcpServers": {
-echo     "songforge": {
+echo     "songforge-mcp": {
 echo       "command": "%SONGFORGE_EXE:\=\\%"
 echo     }
 echo   }

@@ -229,8 +229,8 @@ case "$(uname -s)" in
         if [ "$CONFIGURE_CLAUDE" = "y" ] || [ "$CONFIGURE_CLAUDE" = "Y" ]; then
             mkdir -p "$CONFIG_DIR"
             if [ -f "$CONFIG_FILE" ]; then
-                if grep -q '"songforge"' "$CONFIG_FILE" 2>/dev/null; then
-                    echo "Claude Desktop config already has a songforge entry - skipping."
+                if grep -q '"songforge-mcp"' "$CONFIG_FILE" 2>/dev/null; then
+                    echo "Claude Desktop config already has a songforge-mcp entry - skipping."
                 else
                     cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
                     echo "Backed up existing config to: $CONFIG_FILE.bak"
@@ -238,7 +238,7 @@ case "$(uname -s)" in
                     echo "Found existing Claude Desktop config at: $CONFIG_FILE"
                     echo "You need to MANUALLY add this inside your \"mcpServers\" block:"
                     echo
-                    echo "  \"songforge\": {"
+                    echo "  \"songforge-mcp\": {"
                     echo "    \"command\": \"$SONGFORGE_EXE\""
                     echo "  }"
                 fi
@@ -246,7 +246,7 @@ case "$(uname -s)" in
                 cat > "$CONFIG_FILE" <<EOF
 {
   "mcpServers": {
-    "songforge": {
+    "songforge-mcp": {
       "command": "$SONGFORGE_EXE"
     }
   }
@@ -262,7 +262,7 @@ EOF
         echo "Claude Desktop's official app doesn't run natively on this OS -"
         echo "if you're using it through another means, add this to its MCP config:"
         echo
-        echo "  \"songforge\": {"
+        echo "  \"songforge-mcp\": {"
         echo "    \"command\": \"$SONGFORGE_EXE\""
         echo "  }"
         ;;

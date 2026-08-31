@@ -163,7 +163,7 @@ inside this project's own `.venv`:
 ```json
 {
   "mcpServers": {
-    "songforge": {
+    "songforge-mcp": {
       "command": "/path/to/SongForge-MCP/.venv/Scripts/songforge-mcp.exe"
     }
   }
