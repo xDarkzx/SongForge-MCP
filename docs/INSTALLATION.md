@@ -94,6 +94,16 @@ If `SONGFORGE_ACESTEP_HOME` isn't already set, the installer clones
 a sibling folder and sets up its own virtual environment inside that
 checkout, including:
 
+Since ACE-Step needs Python 3.11-3.12 specifically (unlike this server's
+own venv, which accepts any 3.10+), the installer no longer blindly reuses
+whatever `python`/`python3` happens to resolve on `PATH` for this step —
+that broke silently under pyenv-win, where the global/shim default can be
+a different, incompatible version ([#1](https://github.com/xDarkzx/SongForge-MCP/issues/1)).
+It now probes for a qualifying 3.11/3.12 interpreter first (the Windows
+`py` launcher's `-3.12`/`-3.11`, or versioned `python3.12`/`python3.11`
+binaries on Linux/macOS) and stops with a clear message telling you how to
+install one if none is found.
+
 - PyTorch, pinned to a specific version matched to a known-good CUDA
   build. **This pin matters** — a newer PyTorch version breaks the
   prebuilt accelerated-attention component ACE-Step depends on, which in

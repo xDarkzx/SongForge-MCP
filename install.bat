@@ -50,12 +50,30 @@ if "%SONGFORGE_ACESTEP_HOME%"=="" (
     set "ACESTEP_DEST=%SONGFORGE_ACESTEP_HOME%"
 )
 
+REM ACE-Step 1.5 requires Python 3.11-3.12 specifically (unlike this
+REM server's own venv, which is fine with any 3.10+) - blindly reusing
+REM whatever `python` resolves on PATH breaks silently under pyenv-win,
+REM where the global/shim default can be a different, incompatible
+REM version (confirmed: github.com/xDarkzx/SongForge-MCP/issues/1).
+set "ACESTEP_PYTHON="
+for /f "delims=" %%P in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\find_acestep_python.ps1"') do set "ACESTEP_PYTHON=%%P"
+if "%ACESTEP_PYTHON%"=="" (
+    echo No Python 3.11 or 3.12 interpreter found for ACE-Step 1.5 ^(it needs
+    echo this range specifically - see docs/INSTALLATION.md^).
+    echo If you use pyenv-win, install one and make it the active shell version:
+    echo   pyenv install 3.12.7
+    echo   pyenv shell 3.12.7
+    echo then re-run this installer. Or install Python 3.11/3.12 from python.org
+    echo so it's discoverable via the "py" launcher ^(py -3.12^).
+    exit /b 1
+)
 echo.
 echo Setting up ACE-Step 1.5's own venv - this is the slow part
 echo ^(torch + flash-attn are large downloads, checkpoint download is ~28GB
 echo   and happens on first server launch, not during this step^)...
+echo Using %ACESTEP_PYTHON% for ACE-Step 1.5's venv.
 pushd "%ACESTEP_DEST%"
-python -m venv .venv
+"%ACESTEP_PYTHON%" -m venv .venv
 REM Pinned exactly - do NOT let this float to a newer torch. A newer torch
 REM breaks the prebuilt flash-attn wheel below, which in turn breaks
 REM nano-vllm's CUDA graph capture path (a much worse failure than just

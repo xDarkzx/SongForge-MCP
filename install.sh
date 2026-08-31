@@ -73,6 +73,32 @@ detect_nvidia_gpu() {
     command -v nvidia-smi >/dev/null 2>&1
 }
 
+# ACE-Step 1.5 requires Python 3.11-3.12 specifically (unlike this server's
+# own venv, which is fine with any 3.10+) - blindly reusing whatever
+# `python3` resolves on PATH breaks silently under pyenv/pyenv-win-style
+# version managers, where the global/shim default can be a different,
+# incompatible version (confirmed on Windows: github.com/xDarkzx/SongForge-MCP/issues/1).
+# Checks versioned binaries first (python3.12/python3.11, as installed by
+# most package managers and pyenv), then falls back to python3 itself if
+# its own version happens to already qualify.
+find_acestep_python() {
+    for candidate in python3.12 python3.11; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    if command -v python3 >/dev/null 2>&1; then
+        local ver
+        ver="$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+        if [ "$ver" = "3.11" ] || [ "$ver" = "3.12" ]; then
+            echo "python3"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 # ---- Step 3: this server's own venv ----
 echo
 echo "Setting up songforge-mcp's own venv..."
@@ -92,12 +118,22 @@ else
     ACESTEP_DEST="$SONGFORGE_ACESTEP_HOME"
 fi
 
+ACESTEP_PYTHON="$(find_acestep_python)" || {
+    echo "No Python 3.11 or 3.12 interpreter found for ACE-Step 1.5 (it needs"
+    echo "this range specifically - see docs/INSTALLATION.md)."
+    echo "Install one, e.g.:"
+    echo "  pyenv install 3.12.7 && pyenv local 3.12.7   (if using pyenv)"
+    echo "  or via your package manager: apt-get install python3.12 / brew install python@3.12"
+    exit 1
+}
+
 echo
 echo "Setting up ACE-Step 1.5's own venv - this is the slow part"
 echo "(torch + flash-attn are large downloads, checkpoint download is ~28GB"
 echo " and happens on first server launch, not during this step)..."
+echo "Using $ACESTEP_PYTHON for ACE-Step 1.5's venv."
 pushd "$ACESTEP_DEST" >/dev/null
-python3 -m venv .venv
+"$ACESTEP_PYTHON" -m venv .venv
 if detect_nvidia_gpu; then
     # Pinned exactly, matching install.bat - do NOT let this float to a
     # newer torch. A newer torch breaks the prebuilt flash-attn wheel,
