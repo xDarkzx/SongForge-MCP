@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    ignore:
+      # mcp is pinned <2.0.0 in pyproject.toml deliberately (2.x
+      # restructures mcp.server.fastmcp, which this codebase imports
+      # directly) - without this, Dependabot proposes the same major bump
+      # again every few weeks even after it's closed. Still takes 1.x
+      # minor/patch updates.
+      - dependency-name: "mcp"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
